@@ -1,6 +1,6 @@
 # CiefpVibes - Enigma2 Music Jukebox Plugin
 
-![CiefpVibes Screenshot](path/to/your/screenshot1.png) <!-- Replace with actual image paths or links -->
+![CiefpVibes Screenshot](https://github.com/ciefp/CiefpVibes/blob/main/welcome.jpg) <!-- Replace with actual image paths or links -->
 
 ## Overview
 
@@ -51,9 +51,9 @@ text3. **Install Plugin:**
 
 ## Screenshots
 
-![Main Interface](path/to/your/screenshot1.png)  
-![Playlist Selection](path/to/your/screenshot2.png)  
-![Settings Menu](path/to/your/screenshot3.png)  
+![Main Interface](https://github.com/ciefp/CiefpVibes/blob/main/main.jpg)  
+![Main Interface](https://github.com/ciefp/CiefpVibes/blob/main/main2.jpg)  
+![Playlist Selection](https://github.com/ciefp/CiefpVibes/blob/main/m3u_playlist.jpg)  
 
 ## Development & Contributions
 
