@@ -3,6 +3,7 @@ from __future__ import print_function
 import os
 import json 
 import shutil
+import subprocess
 from Components.ActionMap import ActionMap
 from Components.Label import Label
 from Components.Sources.List import List
@@ -22,13 +23,16 @@ import urllib.request
 
 PLUGIN_NAME = "CiefpVibes"
 PLUGIN_DESC = "Jukebox play music locally and online"
-PLUGIN_VERSION = "1.1" 
+PLUGIN_VERSION = "1.3"  # POVECANA VERZIJA
 PLUGIN_DIR = os.path.dirname(__file__) or "/usr/lib/enigma2/python/Plugins/Extensions/CiefpVibes"
-# ✅ СПАЈАМО ФОЛДЕРЕ У ЈЕДАН КЕШ ФОЛДЕР
 CACHE_DIR = "/tmp/ciefpvibes_cache"
 os.makedirs(CACHE_DIR, exist_ok=True)
 
-# ✅ GitHub API URL-ovi
+# MREŽNI MOUNT POINT
+NETWORK_MOUNT = "/media/network"
+os.makedirs(NETWORK_MOUNT, exist_ok=True)
+
+# GitHub URL-ovi
 GITHUB_M3U_URL = "https://api.github.com/repos/ciefp/CiefpVibesFiles/contents/M3U"
 GITHUB_TV_URL  = "https://api.github.com/repos/ciefp/CiefpVibesFiles/contents/TV"
 GITHUB_RADIO_URL = "https://api.github.com/repos/ciefp/CiefpVibesFiles/contents/RADIO"
@@ -55,11 +59,8 @@ class CiefpVibesMain(Screen):
             <widget name="poster" position="1220,70" size="650,800" alphatest="on" zPosition="1"/>
             <widget name="nowplaying" position="60,900" size="1800,55" font="Regular;40" foregroundColor="#FFFFFF" transparent="1" zPosition="3"/>
             <widget name="elapsed" position="60,965" size="200,40" font="Regular;32" foregroundColor="#ffffff" transparent="1" zPosition="3"/>
-            <!-- Progress bar za stvarno vreme -->
             <widget name="progress_real" position="240,985" size="1150,20" pixmap="skin_default/progress_bg.png" zPosition="2"/>
-            <!-- Pulsirajući progress bar (zeleni) -->
             <widget name="progress_vibe" position="240,985" size="1150,20" pixmap="%s/progress_green.png" zPosition="3"/>
-            <!-- Label za offline status -->
             <widget name="offline_status" position="240,985" size="1150,20" font="Regular;18" foregroundColor="#ff3333" halign="center" valign="center" transparent="0" backgroundColor="#000000" zPosition="4"/>
             <widget name="remaining" position="1420,965" size="350,40" font="Regular;32" foregroundColor="#ffcc00" halign="right" transparent="1" zPosition="3"/>
             <widget name="key_red"    position="60,1030"  size="260,50" font="Regular;32" foregroundColor="#ff5555" transparent="1" zPosition="3"/>
@@ -90,26 +91,23 @@ class CiefpVibesMain(Screen):
         self["key_yellow"] = Label("🟡 SETTINGS")
         self["key_blue"]   = Label("🔵 Online Files")
         
-        # Dva progress bara
         self["progress_real"] = ProgressBar()
         self["progress_vibe"] = ProgressBar()
         self["progress_real"].setValue(0)
         self["progress_vibe"].setValue(0)
         
-        # DODATO: Offline status label
         self["offline_status"] = Label("")
         self["offline_status"].hide()
         self["remaining"] = Label("+0:00")
         self["elapsed"] = Label("0:00")
         
-        # Varijable za detekciju stream statusa
         self.stream_active = False
         self.stream_check_counter = 0
         self.last_audio_data_time = 0
-        self.vibe_direction = 1  # 1 = raste, -1 = opada
+        self.vibe_direction = 1
         self.vibe_value = 0
         
-        self["actions"] = ActionMap(["ColorActions", "WizardActions", "DirectionActions"], {
+        self["actions"] = ActionMap(["ColorActions", "WizardActions", "DirectionActions", "MenuActions"], {
             "ok":       self.playSelected,
             "back":     self.exit,
             "up":       self.up,
@@ -118,18 +116,20 @@ class CiefpVibesMain(Screen):
             "green":    self.openFileBrowser,
             "yellow":   self.openSettings,
             "blue":     self.openGitHubLists,
+            "menu":     self.openNetworkMenu,
         }, -1)
+        
         self.__event_tracker = ServiceEventTracker(screen=self, eventmap={
             iPlayableService.evEOF: self.nextTrack,
             iPlayableService.evUpdatedInfo: self.updateProgress,
             iPlayableService.evStart: self.resetProgress,
-            iPlayableService.evUser+10: self.onAudioData  # Detekcija audio podataka
+            iPlayableService.evUser+10: self.onAudioData
         })
+        
         self.progress_timer = eTimer()
         self.progress_timer.callback.append(self.updateProgress)
         self.vibe_timer = eTimer()
         self.vibe_timer.callback.append(self.updateVibeProgress)
-        # DODATO: Timer za proveru statusa streama
         self.stream_check_timer = eTimer()
         self.stream_check_timer.callback.append(self.checkStreamStatus)
         
@@ -139,11 +139,391 @@ class CiefpVibesMain(Screen):
         self.current_song_info = {"artist": "", "title": ""}
         self.onLayoutFinish.append(self.showDefaultPoster)
 
+    # === MREŽNE METODE ===
+    
+    def openNetworkMenu(self):
+        """Otvori meni za mrežne opcije"""
+        from Screens.ChoiceBox import ChoiceBox
+        
+        self.session.openWithCallback(
+            self.networkMenuSelected,
+            ChoiceBox,
+            title="🌐 Network Options",
+            list=[
+                ("💻 Connect to Laptop (SMB)", "connect_laptop"),
+                ("📡 Browse Network", "browse_network"),
+                ("➕ Add Network Share", "add_share"),
+                ("🔌 Disconnect All", "disconnect"),
+                ("🔍 Auto-Scan", "autoscan"),
+            ]
+        )
+    
+    def networkMenuSelected(self, choice):
+        if not choice:
+            return
+        
+        if choice[1] == "connect_laptop":
+            self.connectToLaptop()
+        elif choice[1] == "browse_network":
+            self.browseNetworkShares()
+        elif choice[1] == "add_share":
+            self.addNetworkShare()
+        elif choice[1] == "disconnect":
+            self.disconnectNetwork()
+        elif choice[1] == "autoscan":
+            self.autoScanNetwork()
+    
+    def connectToLaptop(self):
+        """Poveži se sa laptop-om"""
+        from Screens.VirtualKeyBoard import VirtualKeyBoard
+        
+        self.session.openWithCallback(
+            self.laptopIPEntered,
+            VirtualKeyBoard,
+            title="Enter Laptop IP Address",
+            text="192.168.1."
+        )
+    
+    def laptopIPEntered(self, ip_address):
+        if not ip_address:
+            return
+        
+        self.session.openWithCallback(
+            lambda share_name: self.mountLaptopShare(ip_address, share_name),
+            VirtualKeyBoard,
+            title="Enter Share Name (or leave empty for default)",
+            text=""
+        )
+    
+    def mountLaptopShare(self, ip_address, share_name=""):
+        """Mount-uj SMB share sa laptop-a"""
+        mount_point = os.path.join(NETWORK_MOUNT, "laptop")
+        os.makedirs(mount_point, exist_ok=True)
+        
+        if share_name:
+            smb_path = f"//{ip_address}/{share_name}"
+        else:
+            smb_path = f"//{ip_address}"
+        
+        self["nowplaying"].setText(f"🔗 Connecting to {ip_address}...")
+        
+        if self.mountSMBShare(smb_path, mount_point):
+            self.session.open(
+                MessageBox,
+                f"✅ Successfully connected!\n\nPath: {mount_point}",
+                MessageBox.TYPE_INFO
+            )
+            self.session.openWithCallback(
+                self.fileBrowserClosed,
+                CiefpFileBrowser,
+                initial_dir=mount_point
+            )
+        else:
+            self.session.open(
+                MessageBox,
+                f"❌ Cannot connect!\n\nTry:\n1. Check IP\n2. Enable sharing\n3. Check share name",
+                MessageBox.TYPE_ERROR
+            )
+    
+    def mountSMBShare(self, smb_path, mount_point):
+        """Mount SMB/CIFS share"""
+        try:
+            if os.path.ismount(mount_point):
+                subprocess.run(["umount", "-l", mount_point], capture_output=True)
+            
+            cmd = [
+                "mount", "-t", "cifs",
+                smb_path,
+                mount_point,
+                "-o", "ro,guest,iocharset=utf8"
+            ]
+            
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            
+            if result.returncode == 0:
+                print(f"[CiefpVibes] SMB mount successful")
+                return True
+            else:
+                cmd2 = [
+                    "mount", "-t", "cifs",
+                    smb_path,
+                    mount_point,
+                    "-o", "ro,user=guest,password="
+                ]
+                result2 = subprocess.run(cmd2, capture_output=True, text=True)
+                return result2.returncode == 0
+                
+        except Exception as e:
+            print(f"[CiefpVibes] Mount error: {e}")
+            return False
+    
+    def browseNetworkShares(self):
+        """Pregled postojećih mrežnih deljenja"""
+        mounted_shares = []
+        
+        try:
+            with open("/proc/mounts", "r") as f:
+                for line in f:
+                    if "cifs" in line or "nfs" in line or NETWORK_MOUNT in line:
+                        parts = line.split()
+                        if len(parts) >= 2:
+                            mounted_shares.append(parts[1])
+        
+            if mounted_shares:
+                choices = []
+                for share in mounted_shares:
+                    choices.append((f"📂 {share}", share))
+                
+                choices.append(("➕ Add New Share", "add_new"))
+                
+                self.session.openWithCallback(
+                    self.shareSelected,
+                    ChoiceBox,
+                    title="🌐 Network Shares",
+                    list=choices
+                )
+            else:
+                self.session.open(
+                    MessageBox,
+                    "No network shares found!",
+                    MessageBox.TYPE_INFO
+                )
+                self.connectToLaptop()
+                
+        except Exception as e:
+            print(f"[CiefpVibes] Error reading mounts: {e}")
+    
+    def shareSelected(self, choice):
+        if not choice:
+            return
+        
+        if choice[1] == "add_new":
+            self.connectToLaptop()
+        else:
+            self.session.openWithCallback(
+                self.fileBrowserClosed,
+                CiefpFileBrowser,
+                initial_dir=choice[1]
+            )
+    
+    def addNetworkShare(self):
+        """Dodaj ručno mrežni share"""
+        from Screens.ChoiceBox import ChoiceBox
+        
+        self.session.openWithCallback(
+            self.shareTypeSelected,
+            ChoiceBox,
+            title="➕ Add Network Share",
+            list=[
+                ("💻 Windows SMB/CIFS", "smb"),
+                ("🐧 Linux NFS", "nfs"),
+            ]
+        )
+    
+    def shareTypeSelected(self, choice):
+        if not choice:
+            return
+        
+        share_type = choice[1]
+        
+        self.session.openWithCallback(
+            lambda details: self.configureShare(share_type, details),
+            VirtualKeyBoard,
+            title=f"Enter {share_type.upper()} path",
+            text="192.168.1.100/Music"
+        )
+    
+    def configureShare(self, share_type, path):
+        if not path:
+            return
+        
+        mount_name = path.replace("/", "_").replace(".", "_")
+        mount_point = os.path.join(NETWORK_MOUNT, mount_name)
+        os.makedirs(mount_point, exist_ok=True)
+        
+        if share_type == "smb":
+            success = self.mountSMBShare(f"//{path}", mount_point)
+        elif share_type == "nfs":
+            success = self.mountNFSShare(f"{path}", mount_point)
+        else:
+            self.session.open(
+                MessageBox,
+                f"Share type {share_type} not yet implemented",
+                MessageBox.TYPE_INFO
+            )
+            return
+        
+        if success:
+            self.session.open(
+                MessageBox,
+                f"✅ {share_type.upper()} share mounted!",
+                MessageBox.TYPE_INFO
+            )
+            self.session.openWithCallback(
+                self.fileBrowserClosed,
+                CiefpFileBrowser,
+                initial_dir=mount_point
+            )
+    
+    def mountNFSShare(self, nfs_path, mount_point):
+        """Mount NFS share"""
+        try:
+            cmd = ["mount", "-t", "nfs", nfs_path, mount_point, "-o", "ro"]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            return result.returncode == 0
+        except Exception as e:
+            print(f"[CiefpVibes] NFS mount error: {e}")
+            return False
+    
+    def disconnectNetwork(self):
+        """Unmount sve mrežne share-ove"""
+        try:
+            for item in os.listdir(NETWORK_MOUNT):
+                mount_point = os.path.join(NETWORK_MOUNT, item)
+                if os.path.ismount(mount_point):
+                    subprocess.run(["umount", "-l", mount_point], capture_output=True)
+            
+            self.session.open(
+                MessageBox,
+                "✅ All network shares disconnected",
+                MessageBox.TYPE_INFO
+            )
+        except Exception as e:
+            print(f"[CiefpVibes] Unmount error: {e}")
+    
+    def autoScanNetwork(self):
+        """Automatsko skeniranje mreže za SMB share-ove"""
+        import socket
+        import threading
+        
+        self["nowplaying"].setText("🔍 Scanning network...")
+        
+        def scan_job():
+            found_devices = []
+            
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                s.connect(("8.8.8.8", 80))
+                my_ip = s.getsockname()[0]
+                s.close()
+                
+                base_ip = ".".join(my_ip.split(".")[:3]) + "."
+            except:
+                base_ip = "192.168.1."
+            
+            for i in range(1, 255):
+                ip = base_ip + str(i)
+                try:
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    sock.settimeout(0.3)
+                    result = sock.connect_ex((ip, 445))
+                    
+                    if result == 0:
+                        try:
+                            hostname = socket.gethostbyaddr(ip)[0]
+                        except:
+                            hostname = ip
+                        
+                        found_devices.append((hostname, ip))
+                    
+                    sock.close()
+                except:
+                    pass
+            
+            if found_devices:
+                choices = []
+                for hostname, ip in found_devices:
+                    choices.append((f"💻 {hostname} ({ip})", ip))
+                
+                self.session.openWithCallback(
+                    self.scannedDeviceSelected,
+                    ChoiceBox,
+                    title="🌐 Found Devices",
+                    list=choices
+                )
+            else:
+                self.session.open(
+                    MessageBox,
+                    "No SMB devices found!",
+                    MessageBox.TYPE_INFO
+                )
+            
+            self["nowplaying"].setText("Ready")
+        
+        thread = threading.Thread(target=scan_job)
+        thread.daemon = True
+        thread.start()
+    
+    def scannedDeviceSelected(self, choice):
+        if choice:
+            self.laptopIPEntered(choice[1])
+
+    # === FILE BROWSER METODE ===
+    
+    def openFileBrowser(self):
+        """Otvori file browser"""
+        from Screens.ChoiceBox import ChoiceBox
+        
+        self.session.openWithCallback(
+            self.browserTypeSelected,
+            ChoiceBox,
+            title="📁 Select Source",
+            list=[
+                ("💾 Local Storage", "local"),
+                ("💻 Network (Laptop)", "network"),
+                ("📡 Online Streams", "online"),
+            ]
+        )
+    
+    def browserTypeSelected(self, choice):
+        if not choice:
+            return
+        
+        if choice[1] == "local":
+            self.session.openWithCallback(
+                self.localLocationSelected,
+                ChoiceBox,
+                title="💾 Local Storage",
+                list=[
+                    ("📁 Media/HDD", "/media/hdd"),
+                    ("📁 USB", "/media/usb"),
+                    ("📁 Root", "/"),
+                ]
+            )
+        elif choice[1] == "network":
+            self.openNetworkMenu()
+        elif choice[1] == "online":
+            self.openGitHubLists()
+    
+    def localLocationSelected(self, choice):
+        if choice:
+            self.session.openWithCallback(
+                self.fileBrowserClosed,
+                CiefpFileBrowser,
+                initial_dir=choice[1]
+            )
+
+    # === POSTER METODE ===
+    
     def showDefaultPoster(self):
-        """Prikaži default poster pri pokretanju"""
         default_poster = os.path.join(PLUGIN_DIR, "posters", self.current_poster)
         self.showPoster(default_poster)
 
+    def showPoster(self, path):
+        if not path or not os.path.isfile(path):
+            print(f"[CiefpVibes] Poster not found: {path}")
+            return
+
+        try:
+            # Najsigurnija Enigma2 metoda
+            self["poster"].instance.setPixmapFromFile(path)
+            self["poster"].show()
+            print(f"[CiefpVibes] Poster displayed OK: {path}")
+        except Exception as e:
+            print(f"[CiefpVibes] Poster error: {e}")
+
+    # === CONFIG METODE ===
+    
     def loadConfig(self):
         cfg_path = "/etc/enigma2/ciefpvibes.cfg"
         if os.path.isfile(cfg_path):
@@ -189,6 +569,8 @@ class CiefpVibesMain(Screen):
             except:
                 pass
 
+    # === PLAYLIST LOADING ===
+    
     def loadLastOrDefault(self):
         if os.path.isfile(self.last_playlist_path):
             try:
@@ -203,76 +585,118 @@ class CiefpVibesMain(Screen):
                 pass
         self.loadPlaylist()
 
-    def showPoster(self, path):
-        if not path:
-            return
-
-        # Proveri da li fajl postoji
-        if not os.path.isfile(path):
-            print(f"[CiefpVibes] Poster not found: {path}")
-            # Pokaži default poster
-            default_poster = os.path.join(PLUGIN_DIR, "posters", self.current_poster)
-            if os.path.isfile(default_poster):
-                path = default_poster
-            else:
-                return
-
-        try:
-            # Load the pixmap
-            from enigma import loadPic
-            self["poster"].instance.setPixmap(loadPic(path))
-            self["poster"].show()
-            print(f"[CiefpVibes] Showing poster: {path}")
-        except Exception as e:
-            print(f"[CiefpVibes] Error showing poster: {e}")
-            # Fallback na loadPic
-            try:
-                self["poster"].instance.setPixmapFromFile(path)
-                self["poster"].show()
-            except:
-                pass
-
-    def openFileBrowser(self, initial_dir="/tmp"):
-        self.session.openWithCallback(self.fileBrowserClosed, CiefpFileBrowser, initial_dir)
-
     def fileBrowserClosed(self, result):
         if result:
             filepath, display_name = result
-            print(f"[CiefpVibes] Učitavanje fajla: '{filepath}'")
+            print(f"[CiefpVibes] Loading: '{filepath}'")
             if not os.path.isfile(filepath):
                 self.session.open(MessageBox, f"File does not exist:\n{filepath}", MessageBox.TYPE_ERROR)
                 return
             self.loadPlaylistFromFile(filepath, display_name)
 
     def loadPlaylistFromFile(self, filepath, display_name="Lista"):
+        """Učitaj playlistu iz fajla"""
         self.playlist = []
         ext = os.path.splitext(filepath)[1].lower()
-        if ext == ".tv" or ext == ".radio": 
+        
+        # Proveri da li je direktan audio fajl
+        audio_extensions = (".mp3", ".flac", ".m4a", ".aac", ".wav", ".ogg")
+        
+        if ext in audio_extensions:
+            # DIREKTAN AUDIO FAJL
+            success = self.parseDirectAudioFile(filepath)
+            if success:
+                display_name = f"🎵 {os.path.basename(filepath)}"
+            else:
+                self.session.open(MessageBox, f"Cannot play audio file:\n{filepath}", MessageBox.TYPE_ERROR)
+                return
+                
+        elif ext == ".tv" or ext == ".radio": 
+            # TV/RADIO BOUQUET
             self.parseTVBouquet(filepath)
+            
         elif ext in (".m3u", ".m3u8"):
+            # M3U PLAYLIST
             self.parseM3U(filepath)
+            
         else:
-            self.session.open(MessageBox, "Only .tv .radio and .m3u files!", MessageBox.TYPE_ERROR)
+            self.session.open(MessageBox, 
+                             f"Unsupported file type: {ext}\n\n"
+                             f"Supported formats:\n"
+                             f"• Audio: .mp3 .flac .m4a .aac\n"
+                             f"• Playlists: .m3u .m3u8 .tv .radio", 
+                             MessageBox.TYPE_ERROR)
             return
 
+        # Proveri da li ima pesama
         if not self.playlist:
             self["nowplaying"].setText("Nema pesama")
-            self.session.open(MessageBox, "The file is empty or in an invalid format!", MessageBox.TYPE_WARNING)
+            self.session.open(MessageBox, 
+                             "The file contains no playable music!",
+                             MessageBox.TYPE_WARNING)
             return
 
+        # Postavi listu
         self["playlist"].list = self.playlist
         self["playlist"].index = 0
         self.currentIndex = 0
-        self["nowplaying"].setText(f"📁 {display_name} • {len(self.playlist)} pesama")
+        
+        # Prikaži informacije
+        if len(self.playlist) == 1:
+            self["nowplaying"].setText(f"🎵 {self.playlist[0][0]}")
+        else:
+            self["nowplaying"].setText(f"📁 {display_name} • {len(self.playlist)} pesama")
+        
         self.saveLastPlaylist(filepath, display_name)
         self.playCurrent()
 
+    def parseDirectAudioFile(self, path):
+        """Parsira direktan audio fajl (mp3, flac, m4a)"""
+        print(f"[CiefpVibes] Parsing direct audio file: {path}")
+        
+        if not os.path.isfile(path):
+            print(f"[CiefpVibes] File does not exist: {path}")
+            return False
+        
+        # Uzmi ime pesme iz fajla
+        filename = os.path.basename(path)
+        song_name = os.path.splitext(filename)[0]
+        # Ako ime fajla sadrži " - ", automatski izvuci artist + title
+        if " - " in song_name:
+            parts = song_name.split(" - ", 1)
+            artist = parts[0].strip()
+            title = parts[1].strip()
+            song_name = f"{artist} - {title}"
+
+            # Sačuvaj info za dalju obradu
+            self.current_song_info = {
+                "artist": artist,
+                "title": title
+            }
+        else:
+            # ako nije u formatu "artist - title", neka ostane kao prije
+            self.current_song_info = {
+                "artist": "",
+                "title": song_name
+            }
+
+        # Čišćenje imena
+        song_name = song_name.replace("_", " ").replace("  ", " ")
+        song_name = song_name.replace("-", " - ")
+        song_name = song_name.replace(".", " ")
+        
+        # Dodaj u playlistu
+        self.playlist = [(song_name, path)]
+        print(f"[CiefpVibes] Added direct audio: {song_name}")
+        return True
+
     def parseTVBouquet(self, path):
+        """Parsira .tv ili .radio bouquet fajl"""
         try:
             with open(path, "r", encoding="utf-8", errors="ignore") as f:
                 lines = [line.strip() for line in f.readlines()]
         except Exception as e:
-            print("[CiefpVibes] Greška pri čitanju .tv ili .radio:", e)
+            print(f"[CiefpVibes] Error reading bouquet: {e}")
             return
 
         try:
@@ -281,13 +705,14 @@ class CiefpVibesMain(Screen):
             from urllib import unquote
 
         i = 0
+        entries = 0
+        
         while i < len(lines):
             line = lines[i]
             if line.startswith("#SERVICE 4097:"):
                 try:
                     parts = line[9:].split(":")
                     if len(parts) >= 11:
-                        # Ekstrakcija URL-a i imena
                         if len(parts) > 11:
                             url_encoded = ":".join(parts[10:-1])
                             name = parts[-1].strip()
@@ -297,75 +722,125 @@ class CiefpVibesMain(Screen):
 
                         url = unquote(url_encoded).strip()
 
-                        # Učitaj ime iz #DESCRIPTION ako postoji
                         if not name and i + 1 < len(lines) and lines[i + 1].startswith("#DESCRIPTION"):
                             name = lines[i + 1][13:].strip()
                             i += 1
 
-                        # Čišćenje imena
                         name = name or "Unknown"
                         name = name.replace(" external stream link", "").strip()
-                        name = name.replace(".mp3", "").replace(".flac", "").strip()
+                        for ext in [".mp3", ".flac", ".m4a", ".aac"]:
+                            name = name.replace(ext, "")
+                        name = name.strip()
 
-                        # 🔍 Detekcija audio streama – proširena
                         audio_indicators = [
-                            ".mp3", ".flac", ".aac", ".ogg", ".wav", ".m3u8", ".m3u", ".pls", ".nsv",
+                            ".mp3", ".flac", ".m4a", ".aac", ".ogg", ".wav", 
+                            ".m3u8", ".m3u", ".pls", ".nsv",
                             "/stream", "/;", "/live", "/audio", "/radio", "/listen",
                             "rtmp://", "rtsp://", "http://", "https://"
                         ]
                         is_audio = any(ind in url.lower() for ind in audio_indicators)
 
-                        # ❌ Izuzeci – izbegavamo video streamove
                         video_indicators = [".ts", ".mp4", ".mkv", ".avi", ".mov", "/video", "video=", "?video"]
                         is_video = any(ind in url.lower() for ind in video_indicators)
 
                         if is_audio and not is_video:
                             self.playlist.append((name, url))
-                            print(f"[CiefpVibes] Radio dodat: {name} → {url}")
+                            entries += 1
 
                 except Exception as ex:
-                    print("[CiefpVibes] Greška u obradi linije:", ex)
+                    print(f"[CiefpVibes] Error parsing bouquet line: {ex}")
                 i += 1
             else:
                 i += 1
+        
+        print(f"[CiefpVibes] Bouquet parsed: {entries} entries")
 
     def parseM3U(self, path):
+        """Parsira M3U playlist fajl"""
+        print(f"[CiefpVibes] Parsing M3U playlist: {path}")
+        
         try:
             with open(path, "r", encoding="utf-8", errors="ignore") as f:
                 lines = [line.strip() for line in f.readlines()]
         except Exception as e:
-            print("[CiefpVibes] Greška pri čitanju .m3u:", e)
+            print(f"[CiefpVibes] Error reading M3U: {e}")
+            self.session.open(MessageBox, f"Cannot read playlist:\n{path}", MessageBox.TYPE_ERROR)
             return
-
+        
         current_title = ""
+        entries_found = 0
+        
         for line in lines:
+            if not line:
+                continue
+                
             if line.startswith("#EXTINF:"):
                 if "," in line:
                     current_title = line.split(",", 1)[1].strip()
-            elif line.startswith("http") and (".mp3" in line.lower() or ".flac" in line.lower()):
-                title = (current_title or os.path.basename(line)).replace(".mp3", "").replace(".flac", "").strip()
+            elif line.startswith("http") and any(ext in line.lower() for ext in [".mp3", ".flac", ".m4a", ".aac"]):
+                # Online audio fajl
+                title = (current_title or os.path.basename(line))
+                
+                for ext in [".mp3", ".flac", ".m4a", ".aac"]:
+                    title = title.replace(ext, "")
+                title = title.strip()
+                
                 self.playlist.append((title, line))
+                entries_found += 1
                 current_title = ""
-            elif line and not line.startswith("#") and (".mp3" in line.lower() or ".flac" in line.lower()):
-                title = os.path.basename(line).replace(".mp3", "").replace(".flac", "").strip()
+            elif line and not line.startswith("#") and any(ext in line.lower() for ext in [".mp3", ".flac", ".m4a", ".aac"]):
+                # Lokalni audio fajl
+                title = os.path.basename(line)
+                for ext in [".mp3", ".flac", ".m4a", ".aac"]:
+                    title = title.replace(ext, "")
+                title = title.strip()
+                
+                if not os.path.isabs(line):
+                    m3u_dir = os.path.dirname(path)
+                    absolute_path = os.path.join(m3u_dir, line)
+                    if os.path.exists(absolute_path):
+                        line = absolute_path
+                    else:
+                        print(f"[CiefpVibes] File not found: {line}")
+                        continue
+                
                 self.playlist.append((title, line))
+                entries_found += 1
+                current_title = ""
+        
+        print(f"[CiefpVibes] M3U parsed: {entries_found} entries")
+        
+        if entries_found == 0:
+            for line in lines:
+                if line and not line.startswith("#"):
+                    if line.startswith("http") or any(line.lower().endswith(ext) for ext in [".mp3", ".flac", ".m4a", ".aac"]):
+                        title = os.path.basename(line)
+                        for ext in [".mp3", ".flac", ".m4a", ".aac"]:
+                            title = title.replace(ext, "")
+                        title = title.strip()
+                        self.playlist.append((title, line))
+                        entries_found += 1
+            
+            if entries_found == 0:
+                print(f"[CiefpVibes] No valid entries in M3U")
 
+    # === WELCOME PLAYLIST ===
+    
     def loadPlaylist(self):
+        """Učitaj welcome playlistu sa GitHub-a"""
         welcome_url = "https://raw.githubusercontent.com/ciefp/CiefpVibesFiles/main/TV/userbouquet.ciefpvibes_welcome.tv"
         tmp_path = "/tmp/ciefpvibes_welcome.tv"
         self["nowplaying"].setText("🌐 Loading welcome playlist...")
 
-        # Preuzmi fajl sa GitHub-a
         try:
             urllib.request.urlretrieve(welcome_url, tmp_path)
-            print(f"[CiefpVibes] Downloaded welcome playlist to {tmp_path}")
+            print(f"[CiefpVibes] Downloaded welcome playlist")
         except Exception as e:
             print(f"[CiefpVibes] Download error: {e}")
             self["nowplaying"].setText("⚠ Download failed")
             self.session.open(MessageBox, f"Can't download welcome playlist:\n{e}", MessageBox.TYPE_ERROR)
             return
 
-        # Pročitaj preuzeti fajl
         try:
             with open(tmp_path, "r", encoding="utf-8", errors="ignore") as f:
                 lines = f.readlines()
@@ -374,7 +849,7 @@ class CiefpVibesMain(Screen):
             self["nowplaying"].setText("⚠ File error")
             return
 
-        entries = []  # OVO JE BITNO DODATI!
+        entries = []
         i = 0
 
         while i < len(lines):
@@ -383,29 +858,29 @@ class CiefpVibesMain(Screen):
                 try:
                     parts = line[9:].split(":")
                     if len(parts) >= 11:
-                        # Dekodiraj URL
                         url_encoded = ":".join(parts[10:-1]) if len(parts) > 11 else parts[10]
                         url = unquote(url_encoded)
                         name = "Unknown"
 
-                        # Pročitaj ime iz #DESCRIPTION ako postoji
                         if i + 1 < len(lines) and lines[i + 1].strip().startswith("#DESCRIPTION"):
-                            name = lines[i + 1].strip()[13:].replace(".mp3", "").replace(".flac", "").strip()
+                            name = lines[i + 1].strip()[13:]
+                            for ext in [".mp3", ".flac", ".m4a", ".aac"]:
+                                name = name.replace(ext, "")
+                            name = name.strip()
                             i += 1
                         else:
-                            # Probaj iz poslednjeg dela URL-a
-                            name = parts[-1].replace(".mp3", "").replace(".flac", "").strip()
+                            name = parts[-1]
+                            for ext in [".mp3", ".flac", ".m4a", ".aac"]:
+                                name = name.replace(ext, "")
+                            name = name.strip()
 
-                        # Dodaj samo muzičke fajlove
-                        if ".mp3" in url.lower() or ".flac" in url.lower():
+                        if any(ext in url.lower() for ext in [".mp3", ".flac", ".m4a", ".aac"]):
                             clean_name = name if name != "Unknown" else os.path.basename(url)
                             entries.append((clean_name, url))
-                            print(f"[CiefpVibes] Added: {clean_name}")
                 except Exception as ex:
                     print(f"[CiefpVibes] Error parsing line: {ex}")
             i += 1
 
-        # Postavi playlistu
         self.playlist = entries
         self["playlist"].list = self.playlist
 
@@ -413,30 +888,23 @@ class CiefpVibesMain(Screen):
             self.currentIndex = 0
             self["playlist"].index = 0
             self["nowplaying"].setText(f"🎵 Welcome Playlist • {len(self.playlist)} songs")
-            print(f"[CiefpVibes] Loaded {len(self.playlist)} songs from welcome playlist")
-            # Automatski pokreni prvu pesmu
+            print(f"[CiefpVibes] Loaded {len(self.playlist)} songs")
             self.playCurrent()
         else:
             self["nowplaying"].setText("⚠ Empty playlist")
-            self.session.open(MessageBox, "Welcome playlist is empty or contains no music files!",
+            self.session.open(MessageBox, "Welcome playlist is empty!",
                               MessageBox.TYPE_WARNING)
 
+    # === ALBUM COVER ===
     def fetchAlbumCover(self, artist, title):
-        """Preuzmi album cover za artist/title kombinaciju"""
+        print(f"[CiefpVibes] Searching cover for: {artist} - {title}")
 
-        # DEBUG
-        print(f"[CiefpVibes] Searching cover for: Artist='{artist}', Title='{title}'")
-
-        # Ako nemamo ni artist ni title, ne možemo da tražimo
         if not artist and not title:
-            print(f"[CiefpVibes] No artist/title for cover search")
             return None
 
-        # Čišćenje stringova
         def clean_string(text):
             if not text:
                 return ""
-            # Ukloni nedozvoljene karaktere i trim
             import re
             text = re.sub(r'[<>:"/\\|?*]', '', text)
             text = text.strip()
@@ -445,7 +913,19 @@ class CiefpVibesMain(Screen):
         clean_artist = clean_string(artist)
         clean_title = clean_string(title)
 
-        # Generiši keš ime
+        # Ako nemamo artisa, pokušajmo da izvučemo iz naslova
+        if not clean_artist and clean_title:
+            # Proveri da li title sadrži " - " separator
+            if " - " in clean_title:
+                parts = clean_title.split(" - ", 1)
+                clean_artist = clean_string(parts[0])
+                clean_title = clean_string(parts[1])
+            elif " – " in clean_title:  # drugačiji separator
+                parts = clean_title.split(" – ", 1)
+                clean_artist = clean_string(parts[0])
+                clean_title = clean_string(parts[1])
+
+        # Kreiraj cache ime
         if clean_artist and clean_title:
             cache_name = f"{clean_artist}_{clean_title}.jpg".replace(' ', '_')
         elif clean_title:
@@ -455,38 +935,37 @@ class CiefpVibesMain(Screen):
 
         cache_path = os.path.join(CACHE_DIR, cache_name)
 
-        # Proveri keš
         if os.path.isfile(cache_path):
-            print(f"[CiefpVibes] Cover found in cache: {cache_path}")
+            print(f"[CiefpVibes] Using cached cover: {cache_path}")
             return cache_path
 
-        # Formiraj query za pretragu
         import urllib.parse
 
-        # Prioritetne strategije pretrage:
+        # Formiraj više upita za bolje rezultate
         queries = []
 
-        # 1. Artist + Title (najbolje)
         if clean_artist and clean_title:
+            # 1. Full query sa artistom i title
             queries.append(f"{clean_artist} {clean_title}")
+            # 2. Dodaj album ako je moguće (za Colonia)
+            queries.append(f"{clean_artist} {clean_title} album")
+            # 3. Query samo sa title ali sa artist u zagradi
+            queries.append(f"{clean_title} {clean_artist}")
 
-        # 2. Samo Title (ako nema artist)
         if clean_title and not clean_artist:
             queries.append(clean_title)
+            queries.append(f"{clean_title} cover")
 
-        # 3. Samo Artist (ako nema title)
         if clean_artist and not clean_title:
             queries.append(clean_artist)
 
-        # Prolazak kroz sve strategije
         for query in queries:
             if not query:
                 continue
 
-            encoded_query = urllib.parse.quote(query)
-            url = f"https://itunes.apple.com/search?term={encoded_query}&media=music&limit=1&country=US"
-
             print(f"[CiefpVibes] iTunes query: {query}")
+            encoded_query = urllib.parse.quote(query)
+            url = f"https://itunes.apple.com/search?term={encoded_query}&media=music&limit=3&country=US&entity=song"
 
             try:
                 import socket
@@ -496,34 +975,64 @@ class CiefpVibesMain(Screen):
                     data = json.loads(response.read().decode("utf-8"))
 
                 if data.get("resultCount", 0) > 0:
-                    result = data["results"][0]
+                    results = data["results"]
 
-                    # Uzmi najbolju dostupnu sliku
+                    # Prvo traži tačno podudaranje
+                    for result in results:
+                        result_artist = result.get("artistName", "").lower()
+                        result_title = result.get("trackName", "").lower()
+
+                        # Proveri da li je približno podudaranje
+                        if (clean_artist and clean_artist.lower() in result_artist) or \
+                                (clean_title and clean_title.lower() in result_title):
+                            img_url = result.get("artworkUrl100", "")
+                            if not img_url:
+                                continue
+
+                            img_url = img_url.replace("100x100", "600x600")
+
+                            print(f"[CiefpVibes] Found match: {result_artist} - {result_title}")
+
+                            try:
+                                urllib.request.urlretrieve(img_url, cache_path)
+
+                                if os.path.getsize(cache_path) > 1024:
+                                    print(f"[CiefpVibes] Cover saved: {cache_path}")
+                                    return cache_path
+                                else:
+                                    os.unlink(cache_path)
+                            except Exception as e:
+                                print(f"[CiefpVibes] Download error: {e}")
+                                continue
+
+                    # Ako nema tačnog podudaranja, uzmi prvi rezultat
+                    result = results[0]
                     img_url = result.get("artworkUrl100", "")
                     if not img_url:
                         continue
 
-                    # Poboljšaj kvalitetu
                     img_url = img_url.replace("100x100", "600x600")
 
-                    # Pokušaj da preuzmeš
-                    urllib.request.urlretrieve(img_url, cache_path)
+                    try:
+                        urllib.request.urlretrieve(img_url, cache_path)
 
-                    if os.path.getsize(cache_path) > 1024:
-                        print(f"[CiefpVibes] Cover downloaded: {cache_path}")
-                        return cache_path
-                    else:
-                        os.unlink(cache_path)
+                        if os.path.getsize(cache_path) > 1024:
+                            print(f"[CiefpVibes] Using first result: {cache_path}")
+                            return cache_path
+                        else:
+                            os.unlink(cache_path)
+                    except Exception as e:
+                        print(f"[CiefpVibes] Download error for first result: {e}")
+                        continue
 
             except Exception as e:
-                print(f"[CiefpVibes] iTunes error for '{query}': {e}")
+                print(f"[CiefpVibes] iTunes error: {e}")
                 continue
 
-        print(f"[CiefpVibes] No cover found for {artist} - {title}")
+        print(f"[CiefpVibes] No cover found for: {clean_artist} - {clean_title}")
         return None
 
     def getCacheSize(self):
-        """Vraća ukupnu veličinu cache foldera u MB"""
         try:
             total_size = 0
             for dirpath, dirnames, filenames in os.walk(CACHE_DIR):
@@ -531,14 +1040,12 @@ class CiefpVibesMain(Screen):
                     fp = os.path.join(dirpath, f)
                     if os.path.isfile(fp):
                         total_size += os.path.getsize(fp)
-            return round(total_size / (1024 * 1024), 1)  # U MB
+            return round(total_size / (1024 * 1024), 1)
         except:
             return 0
 
     def clearCache(self):
-        """Obriši sav sadržaj cache foldera"""
         try:
-            # Obriši sve fajlove u cache folderu
             for filename in os.listdir(CACHE_DIR):
                 file_path = os.path.join(CACHE_DIR, filename)
                 try:
@@ -547,56 +1054,105 @@ class CiefpVibesMain(Screen):
                 except Exception as e:
                     print(f"[CiefpVibes] Error deleting {file_path}: {e}")
             
-            # Vrati potvrdu i veličinu (0 MB)
             return True, self.getCacheSize()
         except Exception as e:
             print(f"[CiefpVibes] Error clearing cache: {e}")
             return False, self.getCacheSize()
 
+    # === PLAYBACK ===
     def playCurrent(self):
         if not self.playlist or not (0 <= self.currentIndex < len(self.playlist)):
             return
 
         name, url = self.playlist[self.currentIndex]
 
-        # Resetuj status streama
+        # Ne resetovati song info — plugin sada koristi ono što je ranije parsirano
+        # self.current_song_info ostaje kako ga je postavio parseDirectAudioFile ili ID3 tagovi
+
+        # Da li je lokalni fajl?
+        is_local_file = url.startswith('/') or url.startswith('file://')
+
+        if is_local_file:
+            filepath = url.replace('file://', '')
+            if os.path.isfile(filepath):
+                print(f"[CiefpVibes] Local file detected: {filepath}")
+
+                # Učitavanje tagova
+                tags = self.read_audio_tags(filepath)
+
+                # Sačuvaj tagove
+                self.current_song_info = tags
+
+                # Formiranje imena za prikaz
+                if tags["title"]:
+                    if tags["artist"]:
+                        display_name = f"{tags['artist']} - {tags['title']}"
+                    else:
+                        display_name = tags["title"]
+
+                    self["nowplaying"].setText(f"▶ {display_name}")
+
+                    # Pokušaj dobavljanja omota
+                    if tags["artist"]:
+                        cover = self.fetchAlbumCover(tags["artist"], tags["title"])
+                    else:
+                        cover = None
+
+                    if cover and os.path.isfile(cover):
+                        self.showPoster(cover)
+                    else:
+                        self.showDefaultPoster()
+
+                else:
+                    # Nema tagova
+                    self["nowplaying"].setText(f"▶ {name}")
+                    self.showDefaultPoster()
+
+            else:
+                self["nowplaying"].setText(f"▶ {name}")
+                self.showDefaultPoster()
+
+        else:
+            self["nowplaying"].setText(f"▶ {name}")
+            self.showDefaultPoster()
+
+        # STREAM STATUS RESET
         self.stream_active = True
         self.stream_check_counter = 0
         self.last_audio_data_time = 0
         self.vibe_value = 0
         self.vibe_direction = 1
-        
-        # Sakrij offline status i pokaži progress barove
+
         self["offline_status"].hide()
         self["progress_real"].show()
         self["progress_vibe"].show()
 
-        # Resetuj metapodatke
-        self.current_song_info = {"artist": "", "title": ""}
+        # ==== NOVO: UVIJEK POČNI OD NULE ====
+        try:
+            service = self.session.nav.getCurrentService()
+            if service:
+                seek = service.seek()
+                if seek:
+                    seek.seekTo(0)
+        except:
+            pass
+        # ====================================
 
-        # Postavi osnovni tekst
-        self["nowplaying"].setText(f"▶ {name}")
-
-        # Prikaži default poster na početku
-        self.showDefaultPoster()
-
-        # ✅ Koristi 4097 za sve IP streamove (podržava ICY metadata)
+        # POKRENI PESMU
         ref = eServiceReference(4097, 0, url)
         ref.setName(name)
         self.session.nav.playService(ref)
 
-        # ✅ Eksplicitno pokreni playback — ključno za RTMP/HLS/ICY
+        # Probaj da ukloniš pauzu
         service = self.session.nav.getCurrentService()
         if service:
             pauseable = service.pause()
             if pauseable:
                 pauseable.unpause()
 
-        # Pokreni timere
         self.resetProgress()
         self.progress_timer.start(200, False)
         self.vibe_timer.start(200, False)
-        # Pokreni timer za proveru streama (svakih 2 sekunde)
         self.stream_check_timer.start(2000, False)
 
     def playSelected(self):
@@ -609,7 +1165,7 @@ class CiefpVibesMain(Screen):
         if not self.playlist:
             return
         if self.repeat_mode == "one":
-            pass  # replay same
+            pass
         else:
             self.currentIndex = (self.currentIndex + 1) % len(self.playlist)
             self["playlist"].index = self.currentIndex
@@ -627,14 +1183,12 @@ class CiefpVibesMain(Screen):
         self.progress_timer.start(1000, False)
 
     def onAudioData(self):
-        """Poziva se kada primi audio podatke - označava da je stream aktivan"""
         import time
         self.last_audio_data_time = time.time()
         self.stream_active = True
         self.stream_check_counter = 0
 
     def checkStreamStatus(self):
-        """Proveri da li je stream aktivan"""
         import time
         
         if not self.stream_active:
@@ -642,20 +1196,17 @@ class CiefpVibesMain(Screen):
             
         self.stream_check_counter += 1
         
-        # Ako nismo primili audio podatke u poslednjih 10 sekundi
         if self.last_audio_data_time > 0 and time.time() - self.last_audio_data_time > 10:
             self.stream_active = False
             self.showOfflineStatus()
         
-        # Ako nema progress update u duže vreme
-        elif self.stream_check_counter > 10:  # 20 sekundi bez promene
+        elif self.stream_check_counter > 10:
             service = self.session.nav.getCurrentService()
             if service:
                 seek = service.seek()
                 if seek:
                     pos = seek.getPlayPosition()
                     if pos[0]:
-                        # Proveri da li se pozicija menja
                         if self.current_position == pos[1] and self.current_position > 0:
                             self.stream_active = False
                             self.showOfflineStatus()
@@ -663,17 +1214,14 @@ class CiefpVibesMain(Screen):
                             self.current_position = pos[1]
                             self.stream_check_counter = 0
         
-        # Ponovo pokreni timer
         self.stream_check_timer.start(2000, False)
 
     def showOfflineStatus(self):
-        """Prikaži offline status"""
         self["offline_status"].setText("OFFLINE")
         self["offline_status"].show()
         self["progress_vibe"].hide()
         self.vibe_timer.stop()
         
-        # Ažuriraj tekst za sadašnju pesmu sa OFFLINE oznakom
         if self.playlist and 0 <= self.currentIndex < len(self.playlist):
             name = self.playlist[self.currentIndex][0]
             self["nowplaying"].setText(f"⭕ {name} [OFFLINE]")
@@ -681,58 +1229,44 @@ class CiefpVibesMain(Screen):
     def updateProgress(self):
         service = self.session.nav.getCurrentService()
         if not service:
-            # Ako nema servisa, možda je stream mrtav
             if self.stream_active:
                 self.stream_active = False
                 self.showOfflineStatus()
             return
 
-        # ✅ Čitanje metapodataka
         info = service.info()
         if info:
             raw_title = info.getInfoString(iServiceInformation.sTagTitle).strip()
 
-            # Ako postoji ICY metadata
             if raw_title:
                 if raw_title.startswith("ICY: "):
                     raw_title = raw_title[5:].strip()
 
-                # Parsiraj artist i title KORISTEĆI POBOLJŠANU METODU
                 artist, title = self.parseArtistTitle(raw_title)
 
-                # DEBUG: Ispis za proveru
-                print(f"[CiefpVibes DEBUG] Raw: '{raw_title}'")
-                print(f"[CiefpVibes DEBUG] Parsed: Artist='{artist}', Title='{title}'")
-
-                # Sačuvaj samo ako smo uspeli da parsirajemo
-                if title:  # Bar title treba da postoji
+                if title:
                     self.current_song_info["artist"] = artist
                     self.current_song_info["title"] = title
 
-                    # Ažuriraj poster odmah kada dobijemo nove metapodatke
                     self.updatePosterFromMetadata()
 
-                    # AŽURIRAJ TEKST! Ovo je ključno
                     self.updateNowPlayingText()
 
-            # Proveri i standardne tagove
             artist_tag = info.getInfoString(iServiceInformation.sTagArtist)
             if artist_tag and artist_tag.strip():
                 self.current_song_info["artist"] = artist_tag.strip()
-                self.updateNowPlayingText()  # Ažuriraj tekst
+                self.updateNowPlayingText()
 
             title_tag = info.getInfoString(iServiceInformation.sTagTitle)
             if title_tag and title_tag.strip() and not self.current_song_info["title"]:
-                # Parsiraj samo ako već nema title
                 if " • " in title_tag:
                     parts = title_tag.split(" • ", 1)
                     if len(parts) > 1:
                         artist, title = self.parseArtistTitle(parts[1])
                         self.current_song_info["artist"] = artist
                         self.current_song_info["title"] = title
-                        self.updateNowPlayingText()  # Ažuriraj tekst
+                        self.updateNowPlayingText()
 
-        # Standardna logika za progress bar
         seek = service.seek()
         if not seek:
             return
@@ -752,7 +1286,6 @@ class CiefpVibesMain(Screen):
                 self["remaining"].setText(f"-{mins}:{secs:02d}")
 
     def updateNowPlayingText(self):
-        """Ažuriraj samo tekstualni prikaz (bez postera)"""
         if not self.playlist or self.currentIndex < 0:
             return
 
@@ -767,150 +1300,392 @@ class CiefpVibesMain(Screen):
             display += f" • {title}"
 
         self["nowplaying"].setText(display)
-        print(f"[CiefpVibes] Display updated: {display}")
 
     def updatePosterFromMetadata(self):
-        """Ažuriraj poster na osnovu trenutnih metapodataka"""
         artist = self.current_song_info["artist"]
         title = self.current_song_info["title"]
 
-        # DEBUG
-        print(f"[CiefpVibes] Updating poster for: Artist='{artist}', Title='{title}'")
-
-        # Ako nemamo dovoljno informacija, koristi default poster
         if not artist and not title:
             self.showDefaultPoster()
             return
 
-        # Pokušaj da preuzmeš poster
         cover = self.fetchAlbumCover(artist, title)
 
         if cover and os.path.isfile(cover):
             self.showPoster(cover)
-            print(f"[CiefpVibes] Showing downloaded poster: {cover}")
         else:
-            # Fallback na default poster
             self.showDefaultPoster()
-            print(f"[CiefpVibes] Using default poster (no cover found)")
 
-    def onMetaUpdate(self):
-        service = self.session.nav.getCurrentService()
-        if not service:
-            return
-        info = service.info()
-        if not info:
-            return
+    def parse_id3v1(self, filepath):
+        """Parsira ID3v1 tag iz MP3 fajla"""
+        try:
+            with open(filepath, 'rb') as f:
+                f.seek(-128, 2)  # ID3v1 je poslednjih 128 bajtova
+                tag_data = f.read(128)
 
-        raw_title = info.getInfoString(iServiceInformation.sTagTitle).strip()
-        if not raw_title:
-            return
+                if len(tag_data) == 128 and tag_data[:3] == b'TAG':
+                    title = tag_data[3:33].decode('iso-8859-1', errors='ignore').strip('\x00').strip()
+                    artist = tag_data[33:63].decode('iso-8859-1', errors='ignore').strip('\x00').strip()
+                    album = tag_data[63:93].decode('iso-8859-1', errors='ignore').strip('\x00').strip()
 
-        # Ukloni "ICY: " prefix ako postoji
-        if raw_title.startswith("ICY: "):
-            raw_title = raw_title[5:].strip()
+                    return {
+                        "artist": artist,
+                        "title": title,
+                        "album": album,
+                        "version": "ID3v1"
+                    }
+        except Exception as e:
+            print(f"[CiefpVibes] ID3v1 parse error: {e}")
 
-        # Razdvoji "Artist - Title"
-        artist, title = self.parseArtistTitle(raw_title)
-        self.current_song_info["artist"] = artist
-        self.current_song_info["title"] = title
-        self.updateNowPlaying()
+        return {"artist": "", "title": "", "album": "", "version": ""}
 
-        print(f"[CiefpVibes DEBUG] Metapodaci: '{artist}' - '{title}'")
+    def parse_id3v2_header(self, filepath):
+        """Parsira ID3v2 header i traži tagove"""
+        try:
+            with open(filepath, 'rb') as f:
+                header = f.read(10)
+
+                if len(header) >= 10 and header[:3] == b'ID3':
+                    # ID3v2 tag
+                    major_version = header[3]
+                    revision = header[4]
+                    flags = header[5]
+                    size = (header[6] << 21) | (header[7] << 14) | (header[8] << 7) | header[9]
+
+                    print(f"[CiefpVibes] Found ID3v2.{major_version}.{revision}, size: {size}")
+
+                    # Preskoči extended header ako postoji
+                    if flags & 0x40:
+                        ext_header_size_data = f.read(4)
+                        if len(ext_header_size_data) == 4:
+                            ext_header_size = (ext_header_size_data[0] << 21) | (ext_header_size_data[1] << 14) | (
+                                        ext_header_size_data[2] << 7) | ext_header_size_data[3]
+                            f.seek(ext_header_size, 1)
+
+                    # Parsiraj frame-ove
+                    artist = ""
+                    title = ""
+                    album = ""
+
+                    while True:
+                        frame_header = f.read(10)
+                        if len(frame_header) < 10:
+                            break
+
+                        frame_id = frame_header[:4].decode('ascii', errors='ignore')
+                        frame_size = (frame_header[4] << 24) | (frame_header[5] << 16) | (frame_header[6] << 8) | \
+                                     frame_header[7]
+                        frame_flags = frame_header[8:10]
+
+                        if frame_size <= 0 or frame_size > 1024 * 1024:  # Ograniči veličinu
+                            break
+
+                        frame_data = f.read(frame_size)
+                        if len(frame_data) != frame_size:
+                            break
+
+                        # TPE1 = Artist
+                        if frame_id == 'TPE1':
+                            encoding = frame_data[0]
+                            if encoding == 0:  # ISO-8859-1
+                                artist = frame_data[1:].decode('iso-8859-1', errors='ignore').strip('\x00')
+                            elif encoding == 1 or encoding == 2:  # UTF-16 with BOM
+                                try:
+                                    artist = frame_data[3:].decode('utf-16', errors='ignore').strip('\x00')
+                                except:
+                                    artist = frame_data[1:].decode('utf-16-le', errors='ignore').strip('\x00')
+                            elif encoding == 3:  # UTF-8
+                                artist = frame_data[1:].decode('utf-8', errors='ignore').strip('\x00')
+
+                        # TIT2 = Title
+                        elif frame_id == 'TIT2':
+                            encoding = frame_data[0]
+                            if encoding == 0:
+                                title = frame_data[1:].decode('iso-8859-1', errors='ignore').strip('\x00')
+                            elif encoding == 1 or encoding == 2:
+                                try:
+                                    title = frame_data[3:].decode('utf-16', errors='ignore').strip('\x00')
+                                except:
+                                    title = frame_data[1:].decode('utf-16-le', errors='ignore').strip('\x00')
+                            elif encoding == 3:
+                                title = frame_data[1:].decode('utf-8', errors='ignore').strip('\x00')
+
+                        # TALB = Album
+                        elif frame_id == 'TALB':
+                            encoding = frame_data[0]
+                            if encoding == 0:
+                                album = frame_data[1:].decode('iso-8859-1', errors='ignore').strip('\x00')
+                            elif encoding == 1 or encoding == 2:
+                                try:
+                                    album = frame_data[3:].decode('utf-16', errors='ignore').strip('\x00')
+                                except:
+                                    album = frame_data[1:].decode('utf-16-le', errors='ignore').strip('\x00')
+                            elif encoding == 3:
+                                album = frame_data[1:].decode('utf-8', errors='ignore').strip('\x00')
+
+                    if artist or title or album:
+                        return {
+                            "artist": artist.strip(),
+                            "title": title.strip(),
+                            "album": album.strip(),
+                            "version": f"ID3v2.{major_version}"
+                        }
+
+        except Exception as e:
+            print(f"[CiefpVibes] ID3v2 parse error: {e}")
+
+        return {"artist": "", "title": "", "album": "", "version": ""}
+
+    def read_id3_tags(self, filepath):
+        """Glavna funkcija za čitanje ID3 tagova"""
+        if not filepath or not os.path.isfile(filepath):
+            return {"artist": "", "title": "", "album": ""}
+
+        # Prvo pokušaj ID3v2
+        tags = self.parse_id3v2_header(filepath)
+        if tags["artist"] or tags["title"]:
+            print(f"[CiefpVibes] Found ID3v2 tags: Artist='{tags['artist']}', Title='{tags['title']}'")
+            return tags
+
+        # Onda pokušaj ID3v1
+        tags = self.parse_id3v1(filepath)
+        if tags["artist"] or tags["title"]:
+            print(f"[CiefpVibes] Found ID3v1 tags: Artist='{tags['artist']}', Title='{tags['title']}'")
+            return tags
+
+        print(f"[CiefpVibes] No ID3 tags found in: {os.path.basename(filepath)}")
+        return {"artist": "", "title": "", "album": ""}
+
+    def read_audio_tags(self, filepath):
+        """Čita tagove iz audio fajla (MP3, FLAC, M4A)"""
+        if not filepath or not os.path.isfile(filepath):
+            return {"artist": "", "title": "", "album": ""}
+
+        ext = os.path.splitext(filepath)[1].lower()
+
+        # MP3
+        if ext == '.mp3':
+            return self.read_id3_tags(filepath)
+
+        # FLAC (Vorbis comment)
+        elif ext == '.flac':
+            return self.read_flac_tags(filepath)
+
+        # M4A/AAC (MP4)
+        elif ext in ['.m4a', '.aac']:
+            return self.read_mp4_tags(filepath)
+
+        # OGG
+        elif ext == '.ogg':
+            return self.read_ogg_tags(filepath)
+
+        return {"artist": "", "title": "", "album": ""}
+
+    def read_flac_tags(self, filepath):
+        """Parsira FLAC Vorbis komentare"""
+        try:
+            with open(filepath, 'rb') as f:
+                # Proveri FLAC header
+                header = f.read(4)
+                if header != b'fLaC':
+                    return {"artist": "", "title": "", "album": ""}
+
+                artist = ""
+                title = ""
+                album = ""
+
+                # Traži METADATA_BLOCK_VORBIS_COMMENT
+                while True:
+                    block_header = f.read(4)
+                    if len(block_header) < 4:
+                        break
+
+                    is_last = (block_header[0] >> 7) & 1
+                    block_type = block_header[0] & 0x7F
+                    block_size = (block_header[1] << 16) | (block_header[2] << 8) | block_header[3]
+
+                    if block_type == 4:  # VORBIS_COMMENT
+                        # Preskoči vendor string length
+                        vendor_len_data = f.read(4)
+                        if len(vendor_len_data) == 4:
+                            vendor_len = (vendor_len_data[0] | (vendor_len_data[1] << 8) |
+                                          (vendor_len_data[2] << 16) | (vendor_len_data[3] << 24))
+                            f.seek(vendor_len, 1)
+
+                        # Pročitaj broj komentara
+                        comment_count_data = f.read(4)
+                        if len(comment_count_data) == 4:
+                            comment_count = (comment_count_data[0] | (comment_count_data[1] << 8) |
+                                             (comment_count_data[2] << 16) | (comment_count_data[3] << 24))
+
+                            for _ in range(comment_count):
+                                comment_len_data = f.read(4)
+                                if len(comment_len_data) < 4:
+                                    break
+                                comment_len = (comment_len_data[0] | (comment_len_data[1] << 8) |
+                                               (comment_count_data[2] << 16) | (comment_count_data[3] << 24))
+
+                                comment_data = f.read(comment_len)
+                                if len(comment_data) == comment_len:
+                                    comment = comment_data.decode('utf-8', errors='ignore')
+                                    if '=' in comment:
+                                        key, value = comment.split('=', 1)
+                                        key = key.upper()
+
+                                        if key == 'ARTIST':
+                                            artist = value
+                                        elif key == 'TITLE':
+                                            title = value
+                                        elif key == 'ALBUM':
+                                            album = value
+
+                        return {
+                            "artist": artist.strip(),
+                            "title": title.strip(),
+                            "album": album.strip()
+                        }
+
+                    elif is_last:
+                        break
+                    else:
+                        f.seek(block_size, 1)
+
+        except Exception as e:
+            print(f"[CiefpVibes] FLAC parse error: {e}")
+
+        return {"artist": "", "title": "", "album": ""}
+
+    def read_mp4_tags(self, filepath):
+        """Parsira MP4/M4A tagove"""
+        try:
+            with open(filepath, 'rb') as f:
+                # Pročitaj atoms do "moov"
+                while True:
+                    atom_header = f.read(8)
+                    if len(atom_header) < 8:
+                        break
+
+                    atom_size = (atom_header[0] << 24) | (atom_header[1] << 16) | (atom_header[2] << 8) | atom_header[3]
+                    atom_type = atom_header[4:8].decode('ascii', errors='ignore')
+
+                    if atom_type == 'moov':
+                        moov_start = f.tell() - 8
+
+                        while f.tell() < moov_start + atom_size:
+                            sub_header = f.read(8)
+                            if len(sub_header) < 8:
+                                break
+
+                            sub_size = (sub_header[0] << 24) | (sub_header[1] << 16) | (sub_header[2] << 8) | \
+                                       sub_header[3]
+                            sub_type = sub_header[4:8].decode('ascii', errors='ignore')
+
+                            if sub_type == 'udta':  # User data
+                                udta_start = f.tell() - 8
+
+                                while f.tell() < udta_start + sub_size:
+                                    meta_header = f.read(8)
+                                    if len(meta_header) < 8:
+                                        break
+
+                                    meta_size = (meta_header[0] << 24) | (meta_header[1] << 16) | (
+                                                meta_header[2] << 8) | meta_header[3]
+                                    meta_type = meta_header[4:8].decode('ascii', errors='ignore')
+
+                                    # Traži tagove (pojednostavljeno)
+                                    if meta_type == '©ART':
+                                        artist_data = f.read(meta_size - 8)
+                                        artist = artist_data.decode('utf-8', errors='ignore').strip('\x00')
+                                    elif meta_type == '©nam':
+                                        title_data = f.read(meta_size - 8)
+                                        title = title_data.decode('utf-8', errors='ignore').strip('\x00')
+                                    elif meta_type == '©alb':
+                                        album_data = f.read(meta_size - 8)
+                                        album = album_data.decode('utf-8', errors='ignore').strip('\x00')
+                                    else:
+                                        f.seek(meta_size - 8, 1)
+
+                                return {
+                                    "artist": artist.strip() if 'artist' in locals() else "",
+                                    "title": title.strip() if 'title' in locals() else "",
+                                    "album": album.strip() if 'album' in locals() else ""
+                                }
+                            else:
+                                f.seek(sub_size - 8, 1)
+                    else:
+                        if atom_size < 8:
+                            break
+                        f.seek(atom_size - 8, 1)
+
+        except Exception as e:
+            print(f"[CiefpVibes] MP4 parse error: {e}")
+
+        return {"artist": "", "title": "", "album": ""}
 
     def parseArtistTitle(self, text):
-        """
-        Parsira string u formatu: 'naziv_streama • artist - title' ili 'artist - title'
-        Vraća (artist, title)
-        """
         if not text:
             return "", ""
 
-        print(f"[CiefpVibes PARSING] Input text: '{text}'")
-
-        # 1. Prvo pokušaj da parsiraš format: "Awesome-80-s • Rick Astley - Together Forever"
+        # Prvo proveri da li ima " • " separator
         if " • " in text:
             parts = text.split(" • ", 1)
-            stream_part = parts[0].strip()
             artist_title_part = parts[1].strip()
 
-            print(f"[CiefpVibes PARSING] Stream part: '{stream_part}'")
-            print(f"[CiefpVibes PARSING] Artist/Title part: '{artist_title_part}'")
-
-            # Sada parsiraj artist - title
+            # Proveri sve separatore
             separators = [" - ", " – ", " | ", " :: ", " › ", " / ", " ~ "]
             for sep in separators:
                 if sep in artist_title_part:
                     artist_title = artist_title_part.split(sep, 1)
                     artist = artist_title[0].strip()
                     title = artist_title[1].strip()
-                    print(f"[CiefpVibes PARSING] Found with separator '{sep}': Artist='{artist}', Title='{title}'")
+
+                    # Čišćenje dodatnih informacija
+                    if "(" in title and ")" in title:
+                        title = title.split("(")[0].strip()
+                    if "[" in title and "]" in title:
+                        title = title.split("[")[0].strip()
+
                     return artist, title
 
-            # Ako nema separatora, možda je samo title
-            print(f"[CiefpVibes PARSING] No separator found, using as title: '{artist_title_part}'")
+            # Ako nema separatora, pokušaj da izvučeš iz naslova
             return "", artist_title_part
 
-        # 2. Ako nema " • ", probaj direktno artist - title
+        # Ako nema " • ", pokušaj direktno da parsiraš
         separators = [" - ", " – ", " | ", " :: ", " › ", " / ", " ~ "]
         for sep in separators:
             if sep in text:
                 parts = text.split(sep, 1)
                 artist = parts[0].strip()
                 title = parts[1].strip()
-                print(f"[CiefpVibes PARSING] Direct parsing with '{sep}': Artist='{artist}', Title='{title}'")
+
+                # Čišćenje
+                if "(" in title and ")" in title:
+                    title = title.split("(")[0].strip()
+                if "[" in title and "]" in title:
+                    title = title.split("[")[0].strip()
+
                 return artist, title
 
-        # 3. Ako ništa ne radi, vrati ceo tekst kao title
-        print(f"[CiefpVibes PARSING] No parsing possible, using as title: '{text}'")
+        # Ako nema separatora, pretpostavi da je ceo tekst title
         return "", text.strip()
 
-    def updatePosterFromMetadata(self):
-        """Ažuriraj poster na osnovu trenutnih metapodataka"""
-        artist = self.current_song_info["artist"]
-        title = self.current_song_info["title"]
-
-        # DEBUG
-        print(f"[CiefpVibes POSTER] Updating poster for: Artist='{artist}', Title='{title}'")
-
-        # Ako nemamo dovoljno informacija, koristi default poster
-        if not artist and not title:
-            print(f"[CiefpVibes POSTER] No metadata, using default")
-            self.showDefaultPoster()
-            return
-
-        # Pokušaj da preuzmeš poster
-        cover = self.fetchAlbumCover(artist, title)
-
-        if cover and os.path.isfile(cover):
-            print(f"[CiefpVibes POSTER] Showing downloaded poster: {cover}")
-            self.showPoster(cover)
-        else:
-            # Fallback na default poster
-            print(f"[CiefpVibes POSTER] No cover found, using default")
-            self.showDefaultPoster()
-
-    def updateNowPlaying(self):
-        """Zastarela metoda - koristite updateNowPlayingText umesto nje"""
-        # Ovo sada samo poziva novu metodu za kompatibilnost
-        self.updateNowPlayingText()
-
     def updateVibeProgress(self):
-        """Ažuriraj pulsirajući progress bar samo ako je stream aktivan"""
         if not self.stream_active:
             return
             
-        # Animacija pulsiranja (napred-nazad)
         self.vibe_value += self.vibe_direction * 5
         
         if self.vibe_value >= 70:
             self.vibe_value = 70
-            self.vibe_direction = -1  # Sada ide nazad
+            self.vibe_direction = -1
         elif self.vibe_value <= 0:
             self.vibe_value = 0
-            self.vibe_direction = 1   # Sada ide napred
+            self.vibe_direction = 1
             
         self["progress_vibe"].setValue(self.vibe_value)
 
+    # === EXIT ===
+    
     def exit(self):
         self.session.nav.stopService()
         self.progress_timer.stop()
@@ -919,12 +1694,9 @@ class CiefpVibesMain(Screen):
         self.saveConfig()
         self.close()
 
-    def showAbout(self):
-        self.session.open(MessageBox, f"{PLUGIN_NAME} v{PLUGIN_VERSION}\n\n✅ Funkcije:\n• .tv & .m3u\n• Repeat / Shuffle\n• 5 background-a\n• 5 infobar-a\n• Auto-reload poslednje", MessageBox.TYPE_INFO)
-
     # === SETTINGS ===
+    
     def openSettings(self):
-        # Добиј тренутну величину кеша
         cache_size = self.getCacheSize()
         
         from Screens.ChoiceBox import ChoiceBox
@@ -938,7 +1710,7 @@ class CiefpVibesMain(Screen):
                 ("🎨 Background", "background"),
                 ("🖼️ Poster", "poster"),
                 ("📊 Infobar", "infobar"),
-                ("🧹 Clear Cache", "clear_cache"),  # НОВА ОПЦИЈА
+                ("🧹 Clear Cache", "clear_cache"),
                 ("💾 Save & Load", "save")
             ]
         )
@@ -1027,25 +1799,24 @@ class CiefpVibesMain(Screen):
                     ("Infobar 10", "ib10"),
                 ]
             )
-        elif key == "clear_cache":  # НОВА ОПЦИЈА ЗА ЧИШЋЕЊЕ КЕША
+        elif key == "clear_cache":
             cache_size = self.getCacheSize()
             self.session.openWithCallback(
                 self.clearCacheConfirmed,
                 MessageBox,
-                f"🧹 Clear all cached files?\n\nCurrent cache size: {cache_size}MB\n\nThis will delete:\n• All downloaded album covers\n• All downloaded playlist files\n• All temporary files",
+                f"🧹 Clear all cached files?\n\nCurrent cache size: {cache_size}MB",
                 MessageBox.TYPE_YESNO
             )
         elif key == "save":
             self.saveConfig()
             self.saveLastPlaylist()
-            self.session.open(MessageBox, "💾 Configuration and list saved.", MessageBox.TYPE_INFO)
+            self.session.open(MessageBox, "💾 Configuration saved.", MessageBox.TYPE_INFO)
 
     def clearCacheConfirmed(self, result):
-        """Потврда за брисање кеша"""
         if result:
             success, new_size = self.clearCache()
             if success:
-                self.session.open(MessageBox, f"✅ Cache cleared successfully!\n\nNew cache size: {new_size}MB", MessageBox.TYPE_INFO)
+                self.session.open(MessageBox, f"✅ Cache cleared!\n\nNew size: {new_size}MB", MessageBox.TYPE_INFO)
             else:
                 self.session.open(MessageBox, "❌ Error clearing cache!", MessageBox.TYPE_ERROR)
 
@@ -1094,12 +1865,9 @@ class CiefpVibesMain(Screen):
         if os.path.isfile(bg_path):
             self.current_bg = bg
             self.saveConfig()
-            # Osveži poster pri promeni pozadine
             self.showDefaultPoster()
-            # Restart ekran da primeni skin
             self.session.open(CiefpVibesMain)
             self.close()
-
         else:
             self.session.open(MessageBox, f"❗ Missing:\n{bg_path}", MessageBox.TYPE_ERROR)
 
@@ -1122,7 +1890,6 @@ class CiefpVibesMain(Screen):
         if os.path.isfile(poster_path):
             self.current_poster = poster
             self.saveConfig()
-            # Prikaži novi poster odmah
             self.showDefaultPoster()
             self.session.open(CiefpVibesMain)
             self.close()
@@ -1153,8 +1920,8 @@ class CiefpVibesMain(Screen):
         else:
             self.session.open(MessageBox, f"❗ Nedostaje:\n{ib_path}", MessageBox.TYPE_ERROR)
 
-
-    # ✅ Nova metoda: Online Files (plavo dugme)
+    # === ONLINE FILES ===
+    
     def openGitHubLists(self):
         self.session.openWithCallback(
             self.githubCategorySelected,
@@ -1163,7 +1930,7 @@ class CiefpVibesMain(Screen):
             list=[
                 ("🎶 M3U Playlists", "M3U"),
                 ("📺 .tv Bouquets", "TV"),
-                ("📻 Radio Lists", "RADIO"),  # DODAJ OVO
+                ("📻 Radio Lists", "RADIO"),
             ]
         )
 
@@ -1175,21 +1942,23 @@ class CiefpVibesMain(Screen):
             url = GITHUB_M3U_URL
         elif cat == "TV":
             url = GITHUB_TV_URL
-        elif cat == "RADIO":  # DODAJ OVO
+        elif cat == "RADIO":
             url = GITHUB_RADIO_URL
         else:
             return
 
         items = self.fetchGitHubLists(url, cat)
         if not items:
-            self.session.open(MessageBox, f"There is no list in {cat} category.", MessageBox.TYPE_INFO)
+            self.session.open(MessageBox, f"No lists in {cat} category.", MessageBox.TYPE_INFO)
             return
+        
         self.session.openWithCallback(
             self.githubListSelected,
             ChoiceBox,
             title=f"📥 Choose {cat} list",
             list=[(display, (dl_url, filename)) for display, dl_url, filename in items]
         )
+    
     def fetchGitHubLists(self, url, category):
         try:
             req = urllib.request.Request(url)
@@ -1201,17 +1970,15 @@ class CiefpVibesMain(Screen):
                     if item.get("type") == "file":
                         name = item.get("name", "")
                         dl_url = item.get("download_url")
-                        # DODAJ .radio u proveru ekstenzije
                         if dl_url and name.lower().endswith((".m3u", ".m3u8", ".tv", ".radio")):
                             clean = name
                             if clean.startswith("userbouquet."):
                                 clean = clean[12:]
                             clean = clean.replace("IPTV_OPD_", "").replace("IPTV ", "")
-                            clean = clean.replace("_mp3", "").replace("_flac", "")
+                            clean = clean.replace("_mp3", "").replace("_flac", "").replace("_m4a", "")
                             for date in [" 08.11.2025", "_08112025", "_03112025", "_29112025", "_0909_1"]:
                                 clean = clean.replace(date, "")
                             clean = clean.replace("_", " ").replace(".", " ").strip()
-                            # DODAJ .radio u zamene
                             clean = clean.replace(".tv", "").replace(".radio", "").replace(".m3u", "").replace(".m3u8", "")
                             words = []
                             for w in clean.split():
@@ -1223,74 +1990,278 @@ class CiefpVibesMain(Screen):
                             items.append((display, dl_url, name))
                 return sorted(items, key=lambda x: x[0].lower())
         except Exception as e:
-            print("[CiefpVibes] GitHub %s error: %s" % (category, e))
+            print(f"[CiefpVibes] GitHub error: {e}")
             return []
 
     def githubListSelected(self, choice):
         if not choice:
             return
+        
         dl_url, filename = choice[1]
         display_name = choice[0]
-        # Сачувај у cache директоријум
+        
         tmp_path = os.path.join(CACHE_DIR, filename)
+        
         try:
             urllib.request.urlretrieve(dl_url, tmp_path)
-            self.fileBrowserClosed((tmp_path, display_name))
+            print(f"[CiefpVibes] Downloaded: {filename}")
+            
+            # Debug: pročitaj prvih nekoliko linija
+            with open(tmp_path, "r", encoding="utf-8", errors="ignore") as f:
+                first_lines = f.readlines()[:10]
+                print(f"[CiefpVibes] First 10 lines:")
+                for i, line in enumerate(first_lines):
+                    print(f"  {i}: {line.strip()}")
+            
+            # Učitaj playlistu
+            self.loadPlaylistFromFile(tmp_path, display_name)
+            
         except Exception as e:
-            self.session.open(MessageBox, f"❌ Error while downloading:{e}", MessageBox.TYPE_ERROR)
+            print(f"[CiefpVibes] Error: {e}")
+            self.session.open(MessageBox, 
+                             f"❌ Error:\n{str(e)[:100]}", 
+                             MessageBox.TYPE_ERROR)
 
-    # ✅ Zadrži postojeću showAbout metodu (možeš je koristiti ako želiš preko drugog menija)
-        def showAbout(self):
-            self.session.open(MessageBox,
-                              f"""{PLUGIN_NAME} v{PLUGIN_VERSION}
-    ✅ Funkcije:
-    • .tv, .radio & .m3u
-    • Repeat / Shuffle
-    • 5 background-a
-    • 5 infobar-a
-    • 5 postera
-    • Auto-reload poslednje
-    • 🔵 Online Files""",
-                              MessageBox.TYPE_INFO
-                              )
+    def showAbout(self):
+        self.session.open(MessageBox, 
+                         f"""{PLUGIN_NAME} v{PLUGIN_VERSION}
+✅ Features:
+• Direct MP3/FLAC/M4A playback
+• Network shares (SMB/NFS)
+• Online playlists
+• Album covers
+• 10 backgrounds/infobars/posters
+• Repeat/Shuffle modes""",
+                         MessageBox.TYPE_INFO)
 
-# === FILE BROWSER (nepromenjen) ===
+# === FILE BROWSER ===
 class CiefpFileBrowser(Screen):
     skin = '''
-    <screen position="center,140" size="1600,800" title="..:: Choose a playlist ::..">
+    <screen position="center,140" size="1600,800" title="..:: FILE BROWSER ::..">
         <widget name="filelist" position="10,10" size="1180,620" scrollbarMode="showOnDemand"/>
         <widget name="background" position="1200,0" size="400,800" pixmap="/usr/lib/enigma2/python/Plugins/Extensions/CiefpVibes/fileexplorer.png" zPosition="-1" alphatest="on" />
         <widget name="curr_dir" position="10,650" size="1180,40" font="Regular;30" halign="center"/>
-        <widget name="key_red"   position="150,700" size="400,50" font="Regular;32" halign="center" backgroundColor="#300000" foregroundColor="#ff5555"/>
-        <widget name="key_green" position="650,700" size="400,50" font="Regular;32" halign="center" backgroundColor="#003000" foregroundColor="#55ff55"/>
+        <widget name="key_red"   position="40,700" size="200,50" font="Regular;32" halign="center" backgroundColor="#300000" foregroundColor="#ff5555"/>
+        <widget name="key_green" position="280,700" size="200,50" font="Regular;32" halign="center" backgroundColor="#003000" foregroundColor="#55ff55"/>
+        <widget name="key_yellow" position="520,700" size="200,50" font="Regular;32" halign="center" backgroundColor="#303000" foregroundColor="#ffff55" text="🌐 Network"/>
+        <widget name="key_blue"   position="760,700" size="200,50" font="Regular;32" halign="center" backgroundColor="#000030" foregroundColor="#5599ff" text="📁 Folder"/>
     </screen>
     '''
+    
     def __init__(self, session, initial_dir="/tmp"):
         Screen.__init__(self, session)
         self["background"] = Pixmap()
         self["filelist"] = FileList(initial_dir, showDirectories=True, showFiles=True)
         self["curr_dir"] = Label(initial_dir)
         self["key_red"] = Label("Cancel")
-        self["key_green"] = Label("Izaberi")
+        self["key_green"] = Label("Play")
+        self["key_yellow"] = Label("🌐 Network")
+        self["key_blue"] = Label("📁 Folder")
+        
         self["actions"] = ActionMap(["WizardActions", "DirectionActions", "ColorActions"], {
             "ok": self.ok,
             "cancel": self.cancel,
             "red": self.cancel,
             "green": self.ok,
+            "yellow": self.network,
+            "blue": self.selectFolder,
             "up": self.up,
             "down": self.down,
             "pageUp": self["filelist"].pageUp,
             "pageDown": self["filelist"].pageDown,
         }, -1)
         self.onLayoutFinish.append(self.updateDir)
+    
+    def selectFolder(self):
+        """Učitaj sve audio fajlove u trenutnom folderu"""
+        current_dir = self["filelist"].getCurrentDirectory()
+        
+        if not os.path.isdir(current_dir):
+            self.session.open(MessageBox, "This is not a folder!", MessageBox.TYPE_WARNING)
+            return
+        
+        folder_name = os.path.basename(current_dir.rstrip('/'))
+        self.session.openWithCallback(
+            lambda result: self.createFolderPlaylist(result, current_dir, folder_name),
+            MessageBox,
+            f"Create playlist from ALL audio files?\n\n"
+            f"Folder: {folder_name}\n"
+            f"Files will be sorted by name.",
+            MessageBox.TYPE_YESNO
+        )
+
+    def createFolderPlaylist(self, result, folder_path, folder_name):
+        if not result:
+            return
+
+        audio_files = []
+        supported_extensions = (".mp3", ".flac", ".m4a", ".aac", ".wav", ".ogg")
+
+        print(f"[CiefpVibes] Scanning folder: {folder_path}")
+
+        try:
+            # Kolekcija za hijerarhijsko sortiranje
+            folder_structure = {}  # folder -> lista fajlova
+
+            for root, dirs, files in os.walk(folder_path):
+                dirs[:] = [d for d in dirs if not d.startswith('.')]
+
+                current_files = []
+                for file in files:
+                    file_lower = file.lower()
+                    if any(file_lower.endswith(ext) for ext in supported_extensions):
+                        full_path = os.path.join(root, file)
+                        current_files.append((file, full_path))
+
+                if current_files:
+                    # Sortiraj fajlove u folderu po imenu
+                    current_files.sort(key=lambda x: x[0].lower())
+
+                    # Dodaj u strukturu
+                    rel_path = os.path.relpath(root, folder_path)
+                    if rel_path == ".":
+                        rel_path = ""  # root folder
+
+                    folder_structure[rel_path] = [f[1] for f in current_files]
+
+            # Sada kreiraj playlistu sa hijerarhijom
+            import hashlib
+            import time
+
+            timestamp = int(time.time())
+            folder_hash = hashlib.md5(folder_path.encode()).hexdigest()[:8]
+            temp_dir = "/tmp/ciefpvibes_folders"
+            os.makedirs(temp_dir, exist_ok=True)
+
+            temp_path = os.path.join(temp_dir, f"folder_{folder_hash}_{timestamp}.m3u")
+
+            with open(temp_path, "w", encoding="utf-8") as f:
+                f.write("#EXTM3U\n")
+
+                # Prvo root folder fajlovi
+                if "" in folder_structure:
+                    for audio_file in folder_structure[""]:
+                        self.writeSongToM3U(f, audio_file, folder_path)
+
+                # Onda ostali folderi sortirani po imenu
+                sorted_folders = sorted([f for f in folder_structure.keys() if f != ""])
+
+                for folder in sorted_folders:
+                    # Dodaj separator za folder
+                    folder_display = folder.replace("\\", "/")
+                    if folder_display:
+                        # Dodaj komentar za folder u M3U
+                        f.write(f"# Folder: {folder_display}\n")
+
+                    for audio_file in folder_structure[folder]:
+                        self.writeSongToM3U(f, audio_file, folder_path)
+
+            print(f"[CiefpVibes] Created hierarchical playlist")
+
+            # Prebroji ukupno fajlova
+            total_files = sum(len(files) for files in folder_structure.values())
+            display_name = f"📁 {folder_name} ({total_files} songs)"
+            self.close((temp_path, display_name))
+
+        except Exception as e:
+            print(f"[CiefpVibes] Error: {e}")
+            self.session.open(MessageBox, f"Error:\n{str(e)[:100]}", MessageBox.TYPE_ERROR)
+
+    def writeSongToM3U(self, file_handle, audio_file, base_folder):
+        """Pomoćna funkcija za pisanje pesme u M3U"""
+        filename = os.path.basename(audio_file)
+        song_name = os.path.splitext(filename)[0]
+
+        # Dodaj folder ime ako nije u root-u
+        rel_path = os.path.relpath(os.path.dirname(audio_file), base_folder)
+        if rel_path != ".":
+            folder_name = os.path.basename(rel_path)
+            song_name = f"[{folder_name}] {song_name}"
+
+        song_name = song_name.replace("_", " ").replace("  ", " ")
+        song_name = song_name.replace("-", " - ")
+        song_name = song_name.replace(".", " ")
+
+        file_handle.write(f"#EXTINF:-1,{song_name}\n")
+        file_handle.write(f"{audio_file}\n")
+    
+    def createSingleM3U(self, audio_file):
+        import hashlib
+        import time
+        
+        try:
+            timestamp = int(time.time())
+            file_hash = hashlib.md5(audio_file.encode()).hexdigest()[:8]
+            temp_dir = "/tmp/ciefpvibes_singles"
+            os.makedirs(temp_dir, exist_ok=True)
+            
+            temp_path = os.path.join(temp_dir, f"single_{file_hash}_{timestamp}.m3u")
+            
+            filename = os.path.basename(audio_file)
+            song_name = os.path.splitext(filename)[0]
+            song_name = song_name.replace("_", " ").replace("-", " - ").strip()
+            
+            m3u_content = f"""#EXTM3U
+#EXTINF:-1,{song_name}
+{audio_file}
+"""
+            
+            with open(temp_path, "w", encoding="utf-8") as f:
+                f.write(m3u_content)
+            
+            return temp_path
+            
+        except Exception as e:
+            print(f"[CiefpVibes] Error: {e}")
+            return None
+    
+    def network(self):
+        from Screens.ChoiceBox import ChoiceBox
+        
+        self.session.openWithCallback(
+            self.networkActionSelected,
+            ChoiceBox,
+            title="🌐 Network Actions",
+            list=[
+                ("💻 Connect to Laptop", "laptop"),
+                ("📡 Go to Network Folder", "network_folder"),
+                ("🔌 Disconnect", "disconnect"),
+                ("🏠 Back to Home", "home"),
+            ]
+        )
+    
+    def networkActionSelected(self, choice):
+        if not choice:
+            return
+        
+        if choice[1] == "laptop":
+            self.close((None, "network"))
+        elif choice[1] == "network_folder":
+            if os.path.isdir("/media/network"):
+                self["filelist"].changeDir("/media/network")
+                self.updateDir()
+        elif choice[1] == "disconnect":
+            import subprocess
+            try:
+                subprocess.run(["umount", "-a", "-t", "cifs,nfs"], capture_output=True)
+                self.session.open(MessageBox, "Network shares disconnected", MessageBox.TYPE_INFO)
+            except:
+                pass
+        elif choice[1] == "home":
+            self["filelist"].changeDir("/")
+            self.updateDir()
+    
     def updateDir(self):
         self["curr_dir"].setText(self["filelist"].getCurrentDirectory() or "/")
+    
     def up(self):
         self["filelist"].up()
         self.updateDir()
+    
     def down(self):
         self["filelist"].down()
         self.updateDir()
+    
     def ok(self):
         if self["filelist"].canDescent():
             self["filelist"].descent()
@@ -1299,12 +2270,25 @@ class CiefpFileBrowser(Screen):
             selection = self["filelist"].getSelection()
             if selection and selection[0]:
                 path = selection[0]
-                fn = os.path.basename(path)
-                # DODAJ .radio u proveru
-                if fn.lower().endswith((".tv", ".radio", ".m3u", ".m3u8")):
-                    self.close((path, fn))
+                fn = os.path.basename(path).lower()
+                
+                audio_ext = (".mp3", ".flac", ".m4a", ".aac", ".wav", ".ogg")
+                playlist_ext = (".tv", ".radio", ".m3u", ".m3u8")
+                
+                if any(fn.endswith(ext) for ext in playlist_ext):
+                    self.close((path, os.path.basename(path)))
+                elif any(fn.endswith(ext) for ext in audio_ext):
+                    temp_m3u = self.createSingleM3U(path)
+                    if temp_m3u:
+                        display_name = os.path.splitext(os.path.basename(path))[0]
+                        self.close((temp_m3u, display_name))
+                    else:
+                        self.session.open(MessageBox, f"Cannot play:\n{path}", MessageBox.TYPE_ERROR)
                 else:
-                    self.session.open(MessageBox, "Only .tv, .radio and .m3u files!", MessageBox.TYPE_WARNING)
+                    self.session.open(MessageBox, 
+                                     f"Select music file or playlist!\n\n"
+                                     f"Supported:\n.mp3 .flac .m4a .aac\n.tv .radio .m3u", 
+                                     MessageBox.TYPE_WARNING)
             else:
                 self.session.open(MessageBox, "No file selected!", MessageBox.TYPE_WARNING)
 
@@ -1314,6 +2298,7 @@ class CiefpFileBrowser(Screen):
 # === PLUGIN ENTRY ===
 def main(session, **kwargs):
     session.open(CiefpVibesMain)
+    
 def Plugins(**kwargs):
     return [PluginDescriptor(
         name=f"{PLUGIN_NAME} v{PLUGIN_VERSION}",
