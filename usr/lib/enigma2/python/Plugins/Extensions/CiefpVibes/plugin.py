@@ -72,10 +72,7 @@ GITHUB_RADIO_URL = "https://api.github.com/repos/ciefp/CiefpVibesFiles/contents/
 class CiefpVibesMain(Screen):
     def buildSkin(self):
         bg = getattr(self, "current_bg", "background1.png")
-        ib = getattr(self, "current_ib", "infobar1.png")
-
-        # Dodaj status label za update informacije
-        status_extra = f'\n        <widget name="update_status" position="1250,1030" size="500,40" font="Regular;24" foregroundColor="#ffcc00" halign="right" transparent="1" zPosition="3"/>' if hasattr(self, 'show_update_status') else ''
+        ib = getattr(self, "current_ib", "infobar5.png")
 
         return '''<?xml version="1.0" encoding="utf-8"?>
         <screen position="0,0" size="1920,1080" flags="wfNoBorder" backgroundColor="transparent">
@@ -102,6 +99,8 @@ class CiefpVibesMain(Screen):
             <widget name="key_green"  position="350,1030" size="260,50" font="Regular;32" foregroundColor="#55ff55" transparent="1" zPosition="3"/>
             <widget name="key_yellow" position="640,1030" size="300,50" font="Regular;32" foregroundColor="#ffdd55" transparent="1" zPosition="3"/>
             <widget name="key_blue"   position="980,1030" size="260,50" font="Regular;32" foregroundColor="#5599ff" transparent="1" zPosition="3"/>
+            <!-- DODAJTE OVAJ WIDGET ZA UPDATE STATUS -->
+            <widget name="update_status" position="1250,1030" size="400,40" font="Regular;28" foregroundColor="#ffffff" halign="right" transparent="1" zPosition="3"/>
         </screen>''' % (PLUGIN_DIR, bg, PLUGIN_DIR, ib, PLUGIN_DIR)
 
     def __init__(self, session):
@@ -113,9 +112,6 @@ class CiefpVibesMain(Screen):
         self.loadConfig()
         
         # Update sistem varijable
-        self["update_status"] = Label("")
-        self["update_status"].hide()  # Sakrij dok ne dobijemo rezultat
-        self.show_update_status = True
         self.version_check_in_progress = False
         self.version_buffer = b''
         self.container = eConsoleAppContainer()
@@ -146,11 +142,8 @@ class CiefpVibesMain(Screen):
         self["key_green"]  = Label("🟢 FOLDER")
         self["key_yellow"] = Label("🟡 SETTINGS")
         self["key_blue"]   = Label("🔵 Online Files")
-        
-        # Dodaj update status widget ako je u skin-u
-        if hasattr(self, 'show_update_status'):
-            self["update_status"] = Label("")
-        
+        # Dodajte ovo u __init__ metodi, negde posle ostalih widget definicija:
+        self["update_status"] = Label("")
         self["progress_real"] = ProgressBar()
         self["progress_vibe"] = ProgressBar()
         self["progress_real"].setValue(0)
@@ -881,9 +874,9 @@ class CiefpVibesMain(Screen):
                         if line.startswith("bg="):
                             self.current_bg = line[3:].strip() or "background1.png"
                         elif line.startswith("poster="):
-                            self.current_poster = line[7:].strip() or "poster1.png"
+                            self.current_poster = line[7:].strip() or "poster5.png"
                         elif line.startswith("ib="):
-                            self.current_ib = line[3:].strip() or "infobar1.png"
+                            self.current_ib = line[3:].strip() or "infobar5.png"
                         elif line.startswith("repeat="):
                             self.repeat_mode = line[7:].strip() or "off"
                         elif line.startswith("shuffle="):
