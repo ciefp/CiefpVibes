@@ -4,6 +4,11 @@ import os
 import json 
 import shutil
 import subprocess
+import logging
+import urllib.request
+import uuid
+import time
+import urllib.parse
 from Components.ActionMap import ActionMap
 from Components.Label import Label
 from Components.Sources.List import List
@@ -16,17 +21,44 @@ from Screens.ChoiceBox import ChoiceBox
 from Screens.MessageBox import MessageBox
 from Screens.VirtualKeyBoard import VirtualKeyBoard
 from Tools.Directories import fileExists
-from enigma import eServiceReference, eTimer, iPlayableService, gFont, iServiceInformation, RT_HALIGN_LEFT, RT_VALIGN_CENTER
+from enigma import eServiceReference, eTimer, iPlayableService, gFont, iServiceInformation, RT_HALIGN_LEFT, RT_VALIGN_CENTER, eConsoleAppContainer
 from Plugins.Plugin import PluginDescriptor
 from urllib.parse import unquote
-import urllib.request
 
 PLUGIN_NAME = "CiefpVibes"
 PLUGIN_DESC = "Jukebox play music locally and online"
-PLUGIN_VERSION = "1.3"  # POVECANA VERZIJA
+PLUGIN_VERSION = "1.4"  # POVECANA VERZIJA
 PLUGIN_DIR = os.path.dirname(__file__) or "/usr/lib/enigma2/python/Plugins/Extensions/CiefpVibes"
 CACHE_DIR = "/tmp/ciefpvibes_cache"
 os.makedirs(CACHE_DIR, exist_ok=True)
+
+# === UPDATE SYSTEM VARIABLES ===
+UPDATE_VERSION_URL = "https://raw.githubusercontent.com/ciefp/CiefpVibes/main/version.txt"
+UPDATE_COMMAND = "wget -q --no-check-certificate https://raw.githubusercontent.com/ciefp/CiefpVibes/main/installer.sh -O - | /bin/sh"
+BACKUP_FILE = "/tmp/ciefpvibes_backup.txt"
+
+# Setup logging for updates
+LOG_FILE = "/tmp/ciefpvibes_update.log"
+def setup_update_logging():
+    logger = logging.getLogger("CiefpVibesUpdate")
+    logger.propagate = False
+    if logger.handlers:
+        logger.handlers.clear()
+    
+    logger.setLevel(logging.INFO)
+    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    
+    try:
+        handler = logging.FileHandler(LOG_FILE, mode='a', encoding='utf-8')
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+    except Exception as e:
+        pass
+    
+    return logger
+
+update_logger = setup_update_logging()
+# === END UPDATE SYSTEM ===
 
 # MREŽNI MOUNT POINT
 NETWORK_MOUNT = "/media/network"
@@ -34,13 +66,16 @@ os.makedirs(NETWORK_MOUNT, exist_ok=True)
 
 # GitHub URL-ovi
 GITHUB_M3U_URL = "https://api.github.com/repos/ciefp/CiefpVibesFiles/contents/M3U"
-GITHUB_TV_URL  = "https://api.github.com/repos/ciefp/CiefpVibesFiles/contents/TV"
+GITHUB_TV_URL = "https://api.github.com/repos/ciefp/CiefpVibesFiles/contents/TV"
 GITHUB_RADIO_URL = "https://api.github.com/repos/ciefp/CiefpVibesFiles/contents/RADIO"
 
 class CiefpVibesMain(Screen):
     def buildSkin(self):
         bg = getattr(self, "current_bg", "background1.png")
         ib = getattr(self, "current_ib", "infobar1.png")
+
+        # Dodaj status label za update informacije
+        status_extra = f'\n        <widget name="update_status" position="1250,1030" size="500,40" font="Regular;24" foregroundColor="#ffcc00" halign="right" transparent="1" zPosition="3"/>' if hasattr(self, 'show_update_status') else ''
 
         return '''<?xml version="1.0" encoding="utf-8"?>
         <screen position="0,0" size="1920,1080" flags="wfNoBorder" backgroundColor="transparent">
@@ -76,6 +111,27 @@ class CiefpVibesMain(Screen):
         self.current_poster = "poster1.png"
         self.last_playlist_path = "/etc/enigma2/ciefpvibes_last.txt"
         self.loadConfig()
+        
+        # Update sistem varijable
+        self["update_status"] = Label("")
+        self["update_status"].hide()  # Sakrij dok ne dobijemo rezultat
+        self.show_update_status = True
+        self.version_check_in_progress = False
+        self.version_buffer = b''
+        self.container = eConsoleAppContainer()
+        self.container.appClosed.append(self.command_finished)
+        self.container.dataAvail.append(self.version_data_avail)
+
+        # Dodaj ove varijable za kontrolu postera
+        self.current_poster_path = ""  # Putanja trenutno prikazanog postera
+        self.poster_locked = False  # Da li je poster zaključan (ne menjati)
+        self.poster_change_count = 0  # Broj promena postera za ovu pesmu
+        self.max_poster_changes = 3  # Maksimalno dozvoljeno promena
+        self.last_poster_change = 0  # Vreme poslednje promene postera
+        
+        # Dodaj varijablu za praćenje online stream-a
+        self.is_current_stream_online = False
+        
         self.skin = self.buildSkin()
         Screen.__init__(self, session)
         self.session = session
@@ -91,16 +147,27 @@ class CiefpVibesMain(Screen):
         self["key_yellow"] = Label("🟡 SETTINGS")
         self["key_blue"]   = Label("🔵 Online Files")
         
+        # Dodaj update status widget ako je u skin-u
+        if hasattr(self, 'show_update_status'):
+            self["update_status"] = Label("")
+        
         self["progress_real"] = ProgressBar()
         self["progress_vibe"] = ProgressBar()
         self["progress_real"].setValue(0)
         self["progress_vibe"].setValue(0)
+        # Automatski proveri update 4 sekunde posle starta
+        self.update_timer = eTimer()
+        self.update_timer.callback.append(self.check_for_updates)
+        self.update_timer.start(4000, True)  # jednokratno
+
         
         self["offline_status"] = Label("")
         self["offline_status"].hide()
         self["remaining"] = Label("+0:00")
         self["elapsed"] = Label("0:00")
-        
+        self["selected_folder"] = Label("")
+        self.current_source_name = ""
+
         self.stream_active = False
         self.stream_check_counter = 0
         self.last_audio_data_time = 0
@@ -132,13 +199,211 @@ class CiefpVibesMain(Screen):
         self.vibe_timer.callback.append(self.updateVibeProgress)
         self.stream_check_timer = eTimer()
         self.stream_check_timer.callback.append(self.checkStreamStatus)
-        
+
         self.current_duration = 0
         self.current_position = 0
         self.onFirstExecBegin.append(self.loadLastOrDefault)
         self.current_song_info = {"artist": "", "title": ""}
         self.onLayoutFinish.append(self.showDefaultPoster)
 
+    # === UPDATE SYSTEM METHODS ===
+    def startVersionCheck(self):
+        if self.version_check_in_progress:
+            return
+        print("[CiefpVibes-UPDATE] Checking for updates...")
+        self.version_check_in_progress = True
+        self.version_buffer = b''
+        self.container.execute(f"wget -q --no-check-certificate -O - {UPDATE_VERSION_URL}")
+
+    def showUpdateStatus(self, text="", color="#ffcc00"):
+        """Prikazuje tekst u update_status labelu na dnu ekrana"""
+        if "update_status" in self:
+            if text:
+                self["update_status"].setText(text)
+                self["update_status"].show()
+                print(f"[CiefpVibes-UPDATE] Status shown: {text}")
+            else:
+                self["update_status"].setText("")
+                self["update_status"].hide()
+
+    def check_for_updates(self):
+        """Proveri da li postoji nova verzija plugina"""
+        try:
+            if self.version_check_in_progress:
+                return
+
+            self.version_check_in_progress = True
+            self.showUpdateStatus("Checking update...", "#ffcc00")
+
+            update_logger.info("Starting version check")
+            self.version_buffer = b''
+            self.container.execute(f"wget -q --no-check-certificate -O - {UPDATE_VERSION_URL}")
+
+        except Exception as e:
+            self.version_check_in_progress = False
+            update_logger.error(f"Error starting update check: {str(e)}")
+            self.showUpdateStatus("Update error", "#ff5555")
+
+    def version_data_avail(self, data):
+        if not self.version_check_in_progress:
+            return
+
+        self.version_buffer += data
+
+        # Ako dobijemo kraj (version.txt ima samo jednu liniju)
+        if b'\n' in data or len(self.version_buffer) > 20:
+            try:
+                remote_version = self.version_buffer.decode('utf-8').strip()
+                print(f"[CiefpVibes-UPDATE] Remote: '{remote_version}' | Local: '{PLUGIN_VERSION}'")
+
+                if remote_version and remote_version > PLUGIN_VERSION:  # Nova verzija?
+                    self.showUpdateStatus(f"Update: v{remote_version}", "#ffaa00")
+                    # Pokreni MessageBox za update (pretpostavljam da već imaš ovo)
+                    self.session.openWithCallback(
+                        self.doUpdateCallback,
+                        MessageBox,
+                        f"New version: v{remote_version}\nCurrent: v{PLUGIN_VERSION}\n\nUpdate now?",
+                        MessageBox.TYPE_YESNO
+                    )
+                else:
+                    # Sve OK – prikaži status
+                    self.showUpdateStatus("Up to date ✓", "#55ff55")
+
+            except Exception as e:
+                print(f"[CiefpVibes-UPDATE] Error: {e}")
+                self.showUpdateStatus("Check failed", "#ff5555")
+
+            finally:
+                self.version_check_in_progress = False
+                self.version_buffer = b''
+
+    def command_finished(self, retval):
+        """Obradi završetak wget komande za proveru verzije ili update"""
+        if not hasattr(self, 'version_check_in_progress') or not self.version_check_in_progress:
+            # Ako je ovo kraj update komande (ne provere)
+            if retval == 0:
+                self.update_completed(0)
+            else:
+                self.update_completed(retval)
+            return
+
+        self.version_check_in_progress = False
+
+        if retval == 0:
+            try:
+                remote_version = self.version_buffer.decode('utf-8').strip()
+                update_logger.info(f"Remote version: {remote_version}, Local: {PLUGIN_VERSION}")
+
+                if remote_version and remote_version != PLUGIN_VERSION:
+                    self.showUpdateStatus(f"Update v{remote_version}!", "#ffaa00")
+                    self.session.openWithCallback(
+                        self.start_update,
+                        MessageBox,
+                        f"📥 New version available!\n\n"
+                        f"Current: v{PLUGIN_VERSION}\n"
+                        f"Available: v{remote_version}\n\n"
+                        f"Install now?",
+                        MessageBox.TYPE_YESNO
+                    )
+                else:
+                    self.showUpdateStatus("Up to date ✓", "#55ff55")
+                    update_logger.info("Plugin is up to date")
+
+            except Exception as e:
+                update_logger.error(f"Error parsing version: {str(e)}")
+                self.showUpdateStatus("Version error", "#ff5555")
+        else:
+            update_logger.error(f"Version check failed (retval: {retval})")
+            self.showUpdateStatus("No internet", "#ff5555")
+
+    def start_update(self, answer):
+        """Pokreni update ako je korisnik potvrdio"""
+        if answer:
+            try:
+                update_logger.info("User accepted update")
+                
+                # Backup config fajla
+                config_file = "/etc/enigma2/ciefpvibes.cfg"
+                if os.path.exists(config_file):
+                    shutil.copy2(config_file, BACKUP_FILE)
+                    update_logger.info(f"Backed up config to {BACKUP_FILE}")
+                
+                # Prikaži status
+                if hasattr(self, "update_status"):
+                    self["update_status"].setText("Updating...")
+                
+                # Pokreni update komandu
+                self.container.execute(UPDATE_COMMAND)
+                
+            except Exception as e:
+                update_logger.error(f"Error starting update: {str(e)}")
+                if hasattr(self, "update_status"):
+                    self["update_status"].setText("Update error")
+                self.session.open(
+                    MessageBox,
+                    f"❌ Error starting update:\n{str(e)[:100]}",
+                    MessageBox.TYPE_ERROR
+                )
+
+    def update_completed(self, retval):
+        """Obradi završetak update-a"""
+        try:
+            # Restore backup ako postoji
+            if os.path.exists(BACKUP_FILE):
+                config_file = "/etc/enigma2/ciefpvibes.cfg"
+                shutil.move(BACKUP_FILE, config_file)
+                update_logger.info(f"Restored config from backup")
+            
+            if retval == 0:
+                update_logger.info("Update completed successfully")
+                
+                # Prikaži poruku i ponudi restart
+                self.session.openWithCallback(
+                    self.restart_plugin,
+                    MessageBox,
+                    "✅ Update successful!\n\nRestart plugin now?",
+                    MessageBox.TYPE_YESNO
+                )
+            else:
+                update_logger.error(f"Update failed with retval: {retval}")
+                if hasattr(self, "update_status"):
+                    self["update_status"].setText("Update failed")
+                
+                self.session.open(
+                    MessageBox,
+                    "❌ Update failed!\n\nPlease try again later.",
+                    MessageBox.TYPE_ERROR
+                )
+                
+        except Exception as e:
+            update_logger.error(f"Error in update_completed: {str(e)}")
+
+    def restart_plugin(self, answer):
+        """Restartuje plugin ako je korisnik potvrdio"""
+        if answer:
+            # Zatvori trenutni ekran i ponovo otvori plugin
+            self.close()
+            self.session.openWithCallback(
+                lambda x: None,
+                CiefpVibesMain
+            )
+        else:
+            if hasattr(self, "update_status"):
+                self["update_status"].setText("Restart needed")
+
+    def showUpdateStatus(self, text="", color="#ffcc00"):
+        """Prikazuje tekst u donjem desnom uglu (update status)"""
+        if "update_status" not in self:
+            return
+
+        if text:
+            self["update_status"].setText(text)
+            self["update_status"].show()
+            print(f"[CiefpVibes-UPDATE] Status shown: {text}")
+        else:
+            self["update_status"].setText("")
+            self["update_status"].hide()
+                
     # === MREŽNE METODE ===
     
     def openNetworkMenu(self):
@@ -504,23 +769,106 @@ class CiefpVibesMain(Screen):
             )
 
     # === POSTER METODE ===
-    
+
     def showDefaultPoster(self):
+        # Ovu funkciju zovemo samo kada želimo namerno prikazati default poster
         default_poster = os.path.join(PLUGIN_DIR, "posters", self.current_poster)
+
+        # Proveri da li već prikazujemo default poster
+        if self.current_poster_path == default_poster:
+            return
+
         self.showPoster(default_poster)
 
+        # Default poster ne zaključavamo, može se kasnije zameniti boljim
+        self.poster_locked = False
+        
     def showPoster(self, path):
-        if not path or not os.path.isfile(path):
-            print(f"[CiefpVibes] Poster not found: {path}")
+        print(f"[CiefpVibes-DEBUG] showPoster called with path: {path}")
+        if not path or not os.path.exists(path):
+            print(f"[CiefpVibes-DEBUG] Invalid or missing file")
+            return
+
+        file_size = os.path.getsize(path)
+        if file_size < 1024:
+            print(f"[CiefpVibes-DEBUG] File too small ({file_size} bytes)")
+            return
+
+        # Otključaj ako je trenutni poster default
+        default_posters = [f"poster{i}.png" for i in range(1, 11)]
+        if self.current_poster_path and os.path.basename(self.current_poster_path) in default_posters:
+            self.poster_locked = False
+            self.poster_change_count = 0
+            print(f"[CiefpVibes-DEBUG] Unlocked default poster")
+
+        if self.poster_locked:
+            print(f"[CiefpVibes-DEBUG] Poster locked, skipping change")
+            return
+
+        if self.current_poster_path == path:
+            print(f"[CiefpVibes-DEBUG] Same poster already shown")
+            return
+
+        # Slabiji throttle: dozvoli promenu ako je prošlo bar 0.5 sekundi (ili ako je default)
+        current_time = time.time()
+        if not self.current_poster_path or os.path.basename(self.current_poster_path) in default_posters:
+            # Ako je trenutni default ili nema poster – dozvoli ODMAH
+            pass
+        elif current_time - self.last_poster_change < 0.5:
+            print(f"[CiefpVibes-DEBUG] Throttled: too soon ({current_time - self.last_poster_change:.2f}s)")
+            return
+
+        self.last_poster_change = current_time
+        self.poster_change_count += 1
+
+        if self.poster_change_count > self.max_poster_changes:
+            print(f"[CiefpVibes-DEBUG] Max changes reached, locking poster")
+            self.poster_locked = True
             return
 
         try:
-            # Najsigurnija Enigma2 metoda
             self["poster"].instance.setPixmapFromFile(path)
             self["poster"].show()
-            print(f"[CiefpVibes] Poster displayed OK: {path}")
+            self.current_poster_path = path
+            print(f"[CiefpVibes-DEBUG] SUCCESS: Poster displayed #{self.poster_change_count} → {os.path.basename(path)}")
+
+            # Zaključaj samo ako je dobar (ne-default) poster
+            if os.path.basename(path) not in default_posters:
+                self.poster_locked = True
+                print(f"[CiefpVibes-DEBUG] Good poster → locked for 3 seconds")
+
         except Exception as e:
-            print(f"[CiefpVibes] Poster error: {e}")
+            print(f"[CiefpVibes-DEBUG] ERROR displaying poster: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def forceUnlockAndShowPoster(self, path):
+        """Forsira otključavanje i prikaz postera (za test)"""
+        print(f"[CiefpVibes-FORCE] Forcing poster display: {path}")
+
+        if not os.path.exists(path):
+            print(f"[CiefpVibes-FORCE] ERROR: File does not exist")
+            return False
+
+        # Otključaj poster
+        self.poster_locked = False
+        self.poster_change_count = 0
+
+        # Pokušaj direktno
+        try:
+            self["poster"].instance.setPixmapFromFile(path)
+            self["poster"].show()
+            self.current_poster_path = path
+
+            print(f"[CiefpVibes-FORCE] SUCCESS: Poster forced to display")
+
+            # Prikaži poruku
+            self["nowplaying"].setText(f"📸 Showing: {os.path.basename(path)}")
+
+            return True
+        except Exception as e:
+            print(f"[CiefpVibes-FORCE] ERROR: {str(e)}")
+            return False
 
     # === CONFIG METODE ===
     
@@ -895,9 +1243,9 @@ class CiefpVibesMain(Screen):
             self.session.open(MessageBox, "Welcome playlist is empty!",
                               MessageBox.TYPE_WARNING)
 
-    # === ALBUM COVER ===
+    # === ALBUM COVER ==
     def fetchAlbumCover(self, artist, title):
-        print(f"[CiefpVibes] Searching cover for: {artist} - {title}")
+        print(f"[CiefpVibes] Searching cover for: {artist or 'Unknown'} - {title or 'Unknown'}")
 
         if not artist and not title:
             return None
@@ -907,129 +1255,109 @@ class CiefpVibesMain(Screen):
                 return ""
             import re
             text = re.sub(r'[<>:"/\\|?*]', '', text)
-            text = text.strip()
-            return text
+            return text.strip()
 
         clean_artist = clean_string(artist)
         clean_title = clean_string(title)
 
-        # Ako nemamo artisa, pokušajmo da izvučemo iz naslova
-        if not clean_artist and clean_title:
-            # Proveri da li title sadrži " - " separator
-            if " - " in clean_title:
-                parts = clean_title.split(" - ", 1)
-                clean_artist = clean_string(parts[0])
-                clean_title = clean_string(parts[1])
-            elif " – " in clean_title:  # drugačiji separator
-                parts = clean_title.split(" – ", 1)
-                clean_artist = clean_string(parts[0])
-                clean_title = clean_string(parts[1])
+        cache_dir = CACHE_DIR
 
-        # Kreiraj cache ime
-        if clean_artist and clean_title:
-            cache_name = f"{clean_artist}_{clean_title}.jpg".replace(' ', '_')
-        elif clean_title:
-            cache_name = f"{clean_title}.jpg".replace(' ', '_')
-        else:
-            return None
+        # === PRVO: Provera keša (postojeći HOTFIX, ostaje isti) ===
+        if os.path.exists(cache_dir):
+            for filename in os.listdir(cache_dir):
+                if filename.lower().endswith(('.jpg', '.jpeg', '.png')):
+                    full_path = os.path.join(cache_dir, filename)
+                    if not os.path.isfile(full_path) or os.path.getsize(full_path) < 1024:
+                        continue
 
-        cache_path = os.path.join(CACHE_DIR, cache_name)
+                    filename_lower = filename.lower()
 
-        if os.path.isfile(cache_path):
-            print(f"[CiefpVibes] Using cached cover: {cache_path}")
-            return cache_path
+                    if clean_artist and clean_title:
+                        artist_words = [w for w in clean_artist.lower().split() if len(w) > 2]
+                        title_words = [w for w in clean_title.lower().split() if len(w) > 2]
+                        artist_match = any(w in filename_lower for w in artist_words)
+                        title_match = any(w in filename_lower for w in title_words)
+                        if artist_match and title_match:
+                            print(f"[CiefpVibes-HOTFIX] Perfect cache match: {filename}")
+                            return full_path
+                        if artist_match or title_match:
+                            print(f"[CiefpVibes-HOTFIX] Partial cache match: {filename}")
+                            return full_path
 
+                    elif clean_title:
+                        title_words = [w for w in clean_title.lower().split() if len(w) > 2]
+                        if title_words and any(w in filename_lower for w in title_words):
+                            print(f"[CiefpVibes-HOTFIX] Title-only cache match: {filename}")
+                            return full_path
+
+                    elif clean_artist:
+                        artist_words = [w for w in clean_artist.lower().split() if len(w) > 2]
+                        if artist_words and any(w in filename_lower for w in artist_words):
+                            print(f"[CiefpVibes-HOTFIX] Artist-only cache match: {filename}")
+                            return full_path
+
+        # === DRUGO: iTunes pretraga sa fallback logikom ===
         import urllib.parse
 
-        # Formiraj više upita za bolje rezultate
+        base_url = "https://itunes.apple.com/search"
         queries = []
 
         if clean_artist and clean_title:
-            # 1. Full query sa artistom i title
-            queries.append(f"{clean_artist} {clean_title}")
-            # 2. Dodaj album ako je moguće (za Colonia)
-            queries.append(f"{clean_artist} {clean_title} album")
-            # 3. Query samo sa title ali sa artist u zagradi
-            queries.append(f"{clean_title} {clean_artist}")
+            queries.append((f"{clean_artist} {clean_title}", "song"))
+        if clean_title:
+            queries.append((clean_title, "song"))
+        if clean_artist:
+            queries.append((clean_artist, "album"))  # Fallback: traži albume izvođača
 
-        if clean_title and not clean_artist:
-            queries.append(clean_title)
-            queries.append(f"{clean_title} cover")
-
-        if clean_artist and not clean_title:
-            queries.append(clean_artist)
-
-        for query in queries:
-            if not query:
-                continue
-
-            print(f"[CiefpVibes] iTunes query: {query}")
-            encoded_query = urllib.parse.quote(query)
-            url = f"https://itunes.apple.com/search?term={encoded_query}&media=music&limit=3&country=US&entity=song"
+        for query, entity in queries:
+            print(f"[CiefpVibes] Trying iTunes query: '{query}' (entity={entity})")
+            params = {
+                "term": query,
+                "entity": entity,
+                "limit": 5,
+                "country": "US",
+                "media": "music"
+            }
+            url = base_url + "?" + urllib.parse.urlencode(params)
 
             try:
-                import socket
-                socket.setdefaulttimeout(5)
-
-                with urllib.request.urlopen(url) as response:
-                    data = json.loads(response.read().decode("utf-8"))
-
-                if data.get("resultCount", 0) > 0:
-                    results = data["results"]
-
-                    # Prvo traži tačno podudaranje
-                    for result in results:
-                        result_artist = result.get("artistName", "").lower()
-                        result_title = result.get("trackName", "").lower()
-
-                        # Proveri da li je približno podudaranje
-                        if (clean_artist and clean_artist.lower() in result_artist) or \
-                                (clean_title and clean_title.lower() in result_title):
-                            img_url = result.get("artworkUrl100", "")
-                            if not img_url:
-                                continue
-
-                            img_url = img_url.replace("100x100", "600x600")
-
-                            print(f"[CiefpVibes] Found match: {result_artist} - {result_title}")
-
-                            try:
-                                urllib.request.urlretrieve(img_url, cache_path)
-
-                                if os.path.getsize(cache_path) > 1024:
-                                    print(f"[CiefpVibes] Cover saved: {cache_path}")
-                                    return cache_path
-                                else:
-                                    os.unlink(cache_path)
-                            except Exception as e:
-                                print(f"[CiefpVibes] Download error: {e}")
-                                continue
-
-                    # Ako nema tačnog podudaranja, uzmi prvi rezultat
-                    result = results[0]
-                    img_url = result.get("artworkUrl100", "")
-                    if not img_url:
+                with urllib.request.urlopen(url, timeout=8) as response:
+                    data = json.loads(response.read().decode())
+                    if data.get("resultCount", 0) == 0:
                         continue
 
-                    img_url = img_url.replace("100x100", "600x600")
+                    for result in data["results"]:
+                        artwork100 = result.get("artworkUrl100")
+                        if not artwork100:
+                            continue
 
-                    try:
-                        urllib.request.urlretrieve(img_url, cache_path)
+                        artwork = artwork100.replace("100x100bb", "600x600bb")
 
-                        if os.path.getsize(cache_path) > 1024:
-                            print(f"[CiefpVibes] Using first result: {cache_path}")
-                            return cache_path
-                        else:
-                            os.unlink(cache_path)
-                    except Exception as e:
-                        print(f"[CiefpVibes] Download error for first result: {e}")
-                        continue
+                        res_artist = result.get("artistName", "").lower()
+                        res_title = result.get("trackName", "") or result.get("collectionName", "")
+
+                        # Provera match-a
+                        good_match = True
+                        if clean_artist and clean_artist.lower() not in res_artist:
+                            good_match = False
+                        if entity == "song" and clean_title and clean_title.lower() not in res_title.lower():
+                            good_match = False
+
+                        if good_match:
+                            cache_name = f"{clean_artist or 'Unknown'}_{clean_title or 'Single'}.jpg".replace(' ', '_')
+                            if entity == "album" and not clean_title:
+                                cache_name = f"{clean_artist}_artist.jpg".replace(' ', '_')
+
+                            cover_path = self.downloadAndCacheCover(artwork, cache_name)
+                            if cover_path:
+                                print(f"[CiefpVibes] Downloaded cover: {os.path.basename(cover_path)}")
+                                return cover_path
 
             except Exception as e:
-                print(f"[CiefpVibes] iTunes error: {e}")
+                print(f"[CiefpVibes] iTunes error for '{query}': {e}")
                 continue
 
-        print(f"[CiefpVibes] No cover found for: {clean_artist} - {clean_title}")
+        print(f"[CiefpVibes] No cover found for {artist} - {title}")
         return None
 
     def getCacheSize(self):
@@ -1060,17 +1388,22 @@ class CiefpVibesMain(Screen):
             return False, self.getCacheSize()
 
     # === PLAYBACK ===
+
     def playCurrent(self):
         if not self.playlist or not (0 <= self.currentIndex < len(self.playlist)):
             return
 
-        name, url = self.playlist[self.currentIndex]
+        # RESETUJ kontrolu postera za novu pesmu
+        self.poster_locked = False
+        self.poster_change_count = 0
+        self.current_poster_path = ""
 
-        # Ne resetovati song info — plugin sada koristi ono što je ranije parsirano
-        # self.current_song_info ostaje kako ga je postavio parseDirectAudioFile ili ID3 tagovi
+        name, url = self.playlist[self.currentIndex]
 
         # Da li je lokalni fajl?
         is_local_file = url.startswith('/') or url.startswith('file://')
+        # Da li je online stream?
+        is_online_stream = url.startswith('http://') or url.startswith('https://')
 
         if is_local_file:
             filepath = url.replace('file://', '')
@@ -1092,7 +1425,7 @@ class CiefpVibesMain(Screen):
 
                     self["nowplaying"].setText(f"▶ {display_name}")
 
-                    # Pokušaj dobavljanja omota
+                    # Pokušaj dobavljanja omota (LOCAL LOGIC)
                     if tags["artist"]:
                         cover = self.fetchAlbumCover(tags["artist"], tags["title"])
                     else:
@@ -1111,6 +1444,31 @@ class CiefpVibesMain(Screen):
             else:
                 self["nowplaying"].setText(f"▶ {name}")
                 self.showDefaultPoster()
+
+        elif is_online_stream:
+            # ONLINE STREAM LOGIC
+            self["nowplaying"].setText(f"▶ {name}")
+
+            # Za online stream, odmah pokušaj da dobiješ poster iz metapodataka
+            # Resetuj trenutne podatke o pesmi
+            self.current_song_info = {"artist": "", "title": ""}
+
+            # Prvo prikaži default poster
+            self.showDefaultPoster()
+
+            # === NOVO: Pokušaj fallback iz naziva pesme ODMAH ===
+            # Mnogi GitHub streamovi nemaju ICY podatke, pa parsiraj iz naziva
+            artist_from_name, title_from_name = self.parseArtistTitle(name)
+            if artist_from_name or title_from_name:
+                self.current_song_info["artist"] = artist_from_name
+                self.current_song_info["title"] = title_from_name
+                print(f"[CiefpVibes] Fallback metadata from playlist name: {artist_from_name} - {title_from_name}")
+                self.updateNowPlayingText()
+                # Odmah pokušaj poster na osnovu ovoga
+                self.updatePosterFromMetadata(force_update=True)
+
+            # Sačuvaj informaciju da je ovo online stream
+            self.is_current_stream_online = True
 
         else:
             self["nowplaying"].setText(f"▶ {name}")
@@ -1235,37 +1593,62 @@ class CiefpVibesMain(Screen):
             return
 
         info = service.info()
+        new_metadata = False
+
         if info:
             raw_title = info.getInfoString(iServiceInformation.sTagTitle).strip()
+            artist_tag = info.getInfoString(iServiceInformation.sTagArtist)
+            title_tag = info.getInfoString(iServiceInformation.sTagTitle)
+
+            artist = ""
+            title = ""
 
             if raw_title:
                 if raw_title.startswith("ICY: "):
                     raw_title = raw_title[5:].strip()
-
                 artist, title = self.parseArtistTitle(raw_title)
 
-                if title:
-                    self.current_song_info["artist"] = artist
-                    self.current_song_info["title"] = title
+                if artist or title:
+                    if artist != self.current_song_info["artist"] or title != self.current_song_info["title"]:
+                        self.current_song_info["artist"] = artist
+                        self.current_song_info["title"] = title
+                        new_metadata = True
+                        print(f"[CiefpVibes] New metadata from ICY: {artist} - {title}")
 
-                    self.updatePosterFromMetadata()
+            elif artist_tag and artist_tag.strip():
+                if artist_tag.strip() != self.current_song_info["artist"]:
+                    self.current_song_info["artist"] = artist_tag.strip()
+                    new_metadata = True
+                    print(f"[CiefpVibes] New metadata from tag: Artist={artist_tag}")
 
-                    self.updateNowPlayingText()
-
-            artist_tag = info.getInfoString(iServiceInformation.sTagArtist)
-            if artist_tag and artist_tag.strip():
-                self.current_song_info["artist"] = artist_tag.strip()
-                self.updateNowPlayingText()
-
-            title_tag = info.getInfoString(iServiceInformation.sTagTitle)
-            if title_tag and title_tag.strip() and not self.current_song_info["title"]:
+            elif title_tag and title_tag.strip():
+                # Neki streamovi stavljaju artist • title u title tag
                 if " • " in title_tag:
                     parts = title_tag.split(" • ", 1)
                     if len(parts) > 1:
-                        artist, title = self.parseArtistTitle(parts[1])
-                        self.current_song_info["artist"] = artist
-                        self.current_song_info["title"] = title
-                        self.updateNowPlayingText()
+                        a, t = self.parseArtistTitle(parts[1])
+                        if a or t:
+                            if a != self.current_song_info["artist"] or t != self.current_song_info["title"]:
+                                self.current_song_info["artist"] = a
+                                self.current_song_info["title"] = t
+                                new_metadata = True
+                                print(f"[CiefpVibes] New metadata from title tag: {a} - {t}")
+
+            # === NOVO: Fallback ako nemamo artist, ali imamo title ===
+            if not self.current_song_info["artist"] and self.current_song_info["title"]:
+                if self.playlist and 0 <= self.currentIndex < len(self.playlist):
+                    name = self.playlist[self.currentIndex][0]
+                    fallback_artist, fallback_title = self.parseArtistTitle(name)
+                    if fallback_artist:
+                        self.current_song_info["artist"] = fallback_artist
+                        if fallback_title:
+                            self.current_song_info["title"] = fallback_title
+                        new_metadata = True
+                        print(f"[CiefpVibes] Fallback metadata from playlist name: {fallback_artist} - {self.current_song_info['title']}")
+
+            if new_metadata:
+                self.updateNowPlayingText()
+                self.updatePosterFromMetadata(force_update=True)
 
         seek = service.seek()
         if not seek:
@@ -1301,20 +1684,122 @@ class CiefpVibesMain(Screen):
 
         self["nowplaying"].setText(display)
 
-    def updatePosterFromMetadata(self):
+    def updatePosterFromMetadata(self, force_update=False):
+        print(f"[CiefpVibes-DEBUG] updatePosterFromMetadata called, force_update={force_update}")
+
+        # Otključaj ako je trenutni poster default (da dozvoli novi pokušaj)
+        default_posters = ["poster1.png", "poster2.png", "poster3.png", "poster4.png", "poster5.png",
+                           "poster6.png", "poster7.png", "poster8.png", "poster9.png", "poster10.png"]
+        if self.current_poster_path and os.path.basename(self.current_poster_path) in default_posters:
+            self.poster_locked = False
+            self.poster_change_count = 0
+            print(f"[CiefpVibes-DEBUG] Unlocked default poster for new attempt")
+
+        # === FALLBACK: Ako nemamo artist, pokušaj da ekstraktuješ iz title-a ===
+        if not self.current_song_info["artist"] and self.current_song_info["title"]:
+            title = self.current_song_info["title"]
+            print(f"[CiefpVibes-URGENT] No artist, but have title: '{title}'")
+            # Pokušaj da izvučeš artist iz title-a ako je u formatu "Artist - Title"
+            if " - " in title:
+                parts = title.split(" - ", 1)
+                if len(parts) == 2:
+                    potential_artist = parts[0].strip()
+                    potential_title = parts[1].strip()
+
+                    # Proveri da li je "artist" stvarno artist (nije prazan, ima smisla)
+                    if potential_artist and len(potential_artist) > 1:
+                        print(f"[CiefpVibes-URGENT] Extracted artist from title: '{potential_artist}'")
+                        self.current_song_info["artist"] = potential_artist
+                        self.current_song_info["title"] = potential_title
+                        # Ažuriraj i prikaz
+                        self.updateNowPlayingText()
+
+        # Ako je poster već zaključan i nije force update, nemoj ga menjati
+        # OVO JE KLJUČNA LINIJA ZA BRISANJE / KOMENTARISANJE
+        # if self.poster_locked and not force_update:
+        #     print(f"[CiefpVibes-DEBUG] Poster is locked, skipping update")
+        #     return
+
         artist = self.current_song_info["artist"]
         title = self.current_song_info["title"]
 
-        if not artist and not title:
-            self.showDefaultPoster()
-            return
+        print(f"[CiefpVibes-DEBUG] Artist: '{artist}', Title: '{title}'")
 
+        if not artist and not title:
+            # Nemoj automatski prikazivati default poster
+            # Ako već imamo poster, ostavi ga
+            if not self.current_poster_path:
+                print(f"[CiefpVibes-DEBUG] No artist/title, showing default poster")
+                self.showDefaultPoster()
+            else:
+                print(f"[CiefpVibes-DEBUG] No artist/title, but have existing poster")
+                return
+
+        # Za online stream-ove, uvek pokušaj da nađeš novi poster
+        print(f"[CiefpVibes-DEBUG] Calling fetchAlbumCover...")
         cover = self.fetchAlbumCover(artist, title)
+        print(f"[CiefpVibes-DEBUG] fetchAlbumCover returned: {cover}")
 
         if cover and os.path.isfile(cover):
+            print(f"[CiefpVibes-DEBUG] Cover found, calling showPoster...")
+            # Prikaži novi poster
             self.showPoster(cover)
+
+            # NOVO: Zaključaj poster nakon što se potvrdi da je dobar
+            # Dodaj timer koji će zaključati poster nakon 3 sekunde
+            if self.is_current_stream_online:
+                # Postavi timer za 3 sekunde
+                self.lock_timer = eTimer()
+                self.lock_timer.callback.append(self.lockCurrentPoster)
+                self.lock_timer.start(3000, True)  # 3000ms = 3s
+                print(f"[CiefpVibes-DEBUG] Setting lock timer for 3 seconds...")
         else:
+            # Ako nije nađen poster, prikaži default
             self.showDefaultPoster()
+
+    def downloadAndCacheCover(self, artwork_url, cache_name):
+        """Skida artwork sa URL-a i kešuje ga u /tmp/ciefpvibes_cache"""
+        if not artwork_url:
+            return None
+
+        try:
+            # Normalizuj ime fajla za keš
+            safe_name = "".join(c for c in cache_name if c.isalnum() or c in (" ", "_", "-")).rstrip()
+            if not safe_name:
+                safe_name = "cover"
+            cache_path = os.path.join(CACHE_DIR, safe_name + ".jpg")
+
+            # Ako već postoji u kešu, vrati putanju
+            if os.path.exists(cache_path) and os.path.getsize(cache_path) > 1024:
+                print(f"[CiefpVibes] Using existing cached cover: {cache_path}")
+                return cache_path
+
+            # Skini sliku
+            print(f"[CiefpVibes] Downloading cover from: {artwork_url}")
+            req = urllib.request.Request(artwork_url)
+            req.add_header("User-Agent", f"{PLUGIN_NAME}/{PLUGIN_VERSION}")
+
+            with urllib.request.urlopen(req, timeout=10) as response:
+                with open(cache_path, "wb") as f:
+                    f.write(response.read())
+
+            file_size = os.path.getsize(cache_path)
+            if file_size > 1024:
+                print(f"[CiefpVibes] Cover saved: {cache_path} ({file_size} bytes)")
+                return cache_path
+            else:
+                print(f"[CiefpVibes] Downloaded file too small ({file_size} bytes), deleting")
+                os.remove(cache_path)
+                return None
+
+        except Exception as e:
+            print(f"[CiefpVibes] Error downloading cover: {str(e)}")
+            if os.path.exists(cache_path):
+                try:
+                    os.remove(cache_path)
+                except:
+                    pass
+            return None
 
     def parse_id3v1(self, filepath):
         """Parsira ID3v1 tag iz MP3 fajla"""
@@ -1621,53 +2106,76 @@ class CiefpVibesMain(Screen):
             print(f"[CiefpVibes] MP4 parse error: {e}")
 
         return {"artist": "", "title": "", "album": ""}
-
+        
     def parseArtistTitle(self, text):
         if not text:
             return "", ""
 
-        # Prvo proveri da li ima " • " separator
+        original_text = text
+        text = text.strip()
+        print(f"[CiefpVibes-DEBUG] parseArtistTitle input: '{text}'")
+
+        import re
+
+        # 1. Ukloni godinu na kraju u zagradama (npr. "What Is Love (1993)")
+        text = re.sub(r'\s*\(\d{4}\)\s*$', '', text).strip()
+
+        # 2. Ukloni vodeći redni broj + separator
+        # Podržava oblike: "001 - ", "01 - ", "008-", "10. ", "1 ", "12 -", "123.", itd.
+        text = re.sub(r'^\d{1,4}\s*[\.\-\_\s]+\s*', '', text, flags=re.IGNORECASE).strip()
+
+        print(f"[CiefpVibes-DEBUG] After cleaning track number/year: '{text}'")
+
+        # 3. Poseban slučaj za " • " separator (neki online streamovi)
         if " • " in text:
             parts = text.split(" • ", 1)
-            artist_title_part = parts[1].strip()
+            artist_title_part = parts[1].strip() if len(parts) > 1 else parts[0].strip()
+            print(f"[CiefpVibes-DEBUG] Found ' • ' separator → using part: '{artist_title_part}'")
+        else:
+            artist_title_part = text
 
-            # Proveri sve separatore
-            separators = [" - ", " – ", " | ", " :: ", " › ", " / ", " ~ "]
-            for sep in separators:
-                if sep in artist_title_part:
-                    artist_title = artist_title_part.split(sep, 1)
-                    artist = artist_title[0].strip()
-                    title = artist_title[1].strip()
+        # 4. Lista svih mogućih separatora između artist i title
+        separators = [
+            " - ", " – ", " — ", " | ", " :: ", " › ", " / ", " ~ ",
+            " -", "- ", "– ", "— ", "| ", ":: ", "› ", "/ ", "~ "
+        ]
 
-                    # Čišćenje dodatnih informacija
-                    if "(" in title and ")" in title:
-                        title = title.split("(")[0].strip()
-                    if "[" in title and "]" in title:
-                        title = title.split("[")[0].strip()
-
-                    return artist, title
-
-            # Ako nema separatora, pokušaj da izvučeš iz naslova
-            return "", artist_title_part
-
-        # Ako nema " • ", pokušaj direktno da parsiraš
-        separators = [" - ", " – ", " | ", " :: ", " › ", " / ", " ~ "]
         for sep in separators:
-            if sep in text:
-                parts = text.split(sep, 1)
+            if sep in artist_title_part:
+                parts = artist_title_part.split(sep, 1)
                 artist = parts[0].strip()
                 title = parts[1].strip()
 
-                # Čišćenje
-                if "(" in title and ")" in title:
-                    title = title.split("(")[0].strip()
-                if "[" in title and "]" in title:
-                    title = title.split("[")[0].strip()
+                # Očisti title od nepotrebnih sufiksa
+                title = re.sub(r'\s*(?:\(|\[).*?(?:\)|])\s*$', '', title).strip()  # (Official Video), [Remix] itd.
+                title = re.sub(r'\s*(Official|Video|Audio|Remix|Live|HD|Extended|Mix|Version).*?$', '', title, flags=re.IGNORECASE).strip()
 
-                return artist, title
+                # Ukloni vodeće crtice ili tačke iz title-a
+                while title.startswith(('-', '–', '—', '.', ' ', '_')):
+                    title = title[1:].strip()
 
-        # Ako nema separatora, pretpostavi da je ceo tekst title
-        return "", text.strip()
+                if artist and title:
+                    print(f"[CiefpVibes-DEBUG] SUCCESS → artist='{artist}', title='{title}' (from original: '{original_text}')")
+                    return artist, title
+                elif title:  # Ako ima samo title
+                    print(f"[CiefpVibes-DEBUG] Title only → '{title}'")
+                    return "", title
+
+        # 5. Ako nema separatora – pretpostavi da je sve title
+        print(f"[CiefpVibes-DEBUG] No separator found → title only: '{artist_title_part}'")
+        return "", artist_title_part
+
+    def lockCurrentPoster(self):
+        """Zaključaj trenutni poster nakon što se potvrdi da je dobar."""
+        if self.current_poster_path and not self.poster_locked:
+            # Proveri da li je poster "dobro" ime (da nije default)
+            if "poster" not in self.current_poster_path.lower() or "default" not in self.current_poster_path.lower():
+                print(f"[CiefpVibes-DEBUG] Locking current poster: {os.path.basename(self.current_poster_path)}")
+                self.poster_locked = True
+            else:
+                print(f"[CiefpVibes-DEBUG] Not locking default poster.")
+        else:
+            print(f"[CiefpVibes-DEBUG] No poster to lock or already locked.")
 
     def updateVibeProgress(self):
         if not self.stream_active:
