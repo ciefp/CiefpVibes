@@ -27,7 +27,7 @@ from urllib.parse import unquote
 
 PLUGIN_NAME = "CiefpVibes"
 PLUGIN_DESC = "Jukebox play music locally and online"
-PLUGIN_VERSION = "1.5"  # POVECANA VERZIJA
+PLUGIN_VERSION = "1.6"  # POVECANA VERZIJA
 PLUGIN_DIR = os.path.dirname(__file__) or "/usr/lib/enigma2/python/Plugins/Extensions/CiefpVibes"
 CACHE_DIR = "/tmp/ciefpvibes_cache"
 os.makedirs(CACHE_DIR, exist_ok=True)
@@ -2988,7 +2988,7 @@ class CiefpFileBrowser(Screen):
         self["key_yellow"] = Label("🌐 Network")
         self["key_blue"] = Label("📁 Folder")
         
-        self["actions"] = ActionMap(["WizardActions", "DirectionActions", "ColorActions"], {
+        self["actions"] = ActionMap(["OkCancelActions", "WizardActions", "DirectionActions", "ColorActions"], {
             "ok": self.ok,
             "cancel": self.cancel,
             "red": self.cancel,
