@@ -89,7 +89,8 @@ class CiefpVibesMain(Screen):
             </widget>
             <ePixmap pixmap="%s/infobars/%s" position="0,880" size="1920,140" alphatest="blend" zPosition="1"/>
             <widget name="poster" position="1220,70" size="650,800" alphatest="on" zPosition="1"/>
-            <widget name="nowplaying" position="60,900" size="1800,55" font="Regular;40" foregroundColor="#FFFFFF" transparent="1" zPosition="3"/>
+            <widget name="nowplaying" position="60,900" size="1600,55" font="Regular;40" foregroundColor="#FFFFFF" transparent="1" zPosition="4"/>
+            <widget name="time" position="1600,900" size="200,40" font="Regular;32" halign="center" valign="center" foregroundColor="#ffffff" transparent="1" zPosition="3"/>
             <widget name="elapsed" position="60,965" size="200,40" font="Regular;32" foregroundColor="#ffffff" transparent="1" zPosition="3"/>
             <widget name="progress_real" position="240,985" size="1150,20" pixmap="skin_default/progress_bg.png" zPosition="2"/>
             <widget name="progress_vibe" position="240,985" size="1150,20" pixmap="%s/progress_green.png" zPosition="3"/>
@@ -179,6 +180,7 @@ class CiefpVibesMain(Screen):
         
         self["offline_status"] = Label("")
         self["offline_status"].hide()
+        self["time"] = Label("")
         self["remaining"] = Label("+0:00")
         self["elapsed"] = Label("0:00")
         self["selected_folder"] = Label("")
@@ -209,6 +211,11 @@ class CiefpVibesMain(Screen):
             iPlayableService.evUser+10: self.onAudioData
         })
         
+        self.time_update_timer = eTimer()
+        self.time_update_timer.callback.append(self.updateTime)
+        self.time_update_timer.start(1000)
+        self.onClose.append(self.time_update_timer.stop)
+        
         self.progress_timer = eTimer()
         self.progress_timer.callback.append(self.updateProgress)
         self.vibe_timer = eTimer()
@@ -222,6 +229,14 @@ class CiefpVibesMain(Screen):
         self.current_song_info = {"artist": "", "title": ""}
         self.onLayoutFinish.append(self.showDefaultPoster)
 
+    def updateTime(self):
+        try:
+            import time
+            t = time.strftime("%H:%M:%S")
+            self["time"].setText(t)
+        except:
+            pass
+            
     def setupPosterTimer(self):
         """Postavi callback za poster timer (zamenjeno od ranije)"""
         print(f"[CiefpVibes] Poster timer setup")
