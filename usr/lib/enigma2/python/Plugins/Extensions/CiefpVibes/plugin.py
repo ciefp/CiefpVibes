@@ -27,7 +27,7 @@ from urllib.parse import unquote
 
 PLUGIN_NAME = "CiefpVibes"
 PLUGIN_DESC = "Jukebox play music locally and online"
-PLUGIN_VERSION = "1.6"  # POVECANA VERZIJA
+PLUGIN_VERSION = "1.7"  # POVECANA VERZIJA
 PLUGIN_DIR = os.path.dirname(__file__) or "/usr/lib/enigma2/python/Plugins/Extensions/CiefpVibes"
 CACHE_DIR = "/tmp/ciefpvibes_cache"
 os.makedirs(CACHE_DIR, exist_ok=True)
@@ -65,7 +65,8 @@ NETWORK_MOUNT = "/media/network"
 os.makedirs(NETWORK_MOUNT, exist_ok=True)
 
 # GitHub URL-ovi
-GITHUB_M3U_URL = "https://api.github.com/repos/ciefp/CiefpVibesFiles/contents/M3U"
+GITHUB_M3U_ARTIST_URL = "https://api.github.com/repos/ciefp/CiefpVibesFiles/contents/M3U-ARTIST"
+GITHUB_M3U_MIX_URL = "https://api.github.com/repos/ciefp/CiefpVibesFiles/contents/M3U-MIX"
 GITHUB_TV_URL = "https://api.github.com/repos/ciefp/CiefpVibesFiles/contents/TV"
 GITHUB_RADIO_URL = "https://api.github.com/repos/ciefp/CiefpVibesFiles/contents/RADIO"
 
@@ -89,13 +90,11 @@ class CiefpVibesMain(Screen):
             </widget>
             <ePixmap pixmap="%s/infobars/%s" position="0,880" size="1920,140" alphatest="blend" zPosition="1"/>
             <widget name="poster" position="1220,70" size="650,800" alphatest="on" zPosition="1"/>
-            <widget name="nowplaying" position="60,900" size="1600,55" font="Regular;40" foregroundColor="#FFFFFF" transparent="1" zPosition="4"/>
-            <widget name="time" position="1600,900" size="200,40" font="Regular;32" halign="center" valign="center" foregroundColor="#ffffff" transparent="1" zPosition="3"/>
-            <widget name="elapsed" position="60,965" size="200,40" font="Regular;32" foregroundColor="#ffffff" transparent="1" zPosition="3"/>
+            <widget name="nowplaying" position="60,900" size="1800,55" font="Regular;40" foregroundColor="#FFFFFF" transparent="1" zPosition="4"/>
+            <widget name="time" position="1600,965" size="200,40" font="Regular;32" halign="center" valign="center" foregroundColor="#ffffff" transparent="1" zPosition="3"/>
             <widget name="progress_real" position="240,985" size="1150,20" pixmap="skin_default/progress_bg.png" zPosition="2"/>
             <widget name="progress_vibe" position="240,985" size="1150,20" pixmap="%s/progress_green.png" zPosition="3"/>
             <widget name="offline_status" position="240,985" size="1150,20" font="Regular;18" foregroundColor="#ff3333" halign="center" valign="center" transparent="0" backgroundColor="#000000" zPosition="4"/>
-            <widget name="remaining" position="1420,965" size="350,40" font="Regular;32" foregroundColor="#ffcc00" halign="right" transparent="1" zPosition="3"/>
             <widget name="key_red"    position="60,1030"  size="260,50" font="Regular;32" foregroundColor="#ff5555" transparent="1" zPosition="3"/>
             <widget name="key_green"  position="350,1030" size="260,50" font="Regular;32" foregroundColor="#55ff55" transparent="1" zPosition="3"/>
             <widget name="key_yellow" position="640,1030" size="300,50" font="Regular;32" foregroundColor="#ffdd55" transparent="1" zPosition="3"/>
@@ -2618,10 +2617,11 @@ class CiefpVibesMain(Screen):
         if not self.stream_active:
             return
             
-        self.vibe_value += self.vibe_direction * 5
+        speed = 10  # Možete menjati ovo od 1 (sporo) do 10 (brzo)
+        self.vibe_value += self.vibe_direction * speed
         
-        if self.vibe_value >= 70:
-            self.vibe_value = 70
+        if self.vibe_value >= 100:
+            self.vibe_value = 100
             self.vibe_direction = -1
         elif self.vibe_value <= 0:
             self.vibe_value = 0
@@ -2873,7 +2873,8 @@ class CiefpVibesMain(Screen):
             ChoiceBox,
             title="📥 Online Files",
             list=[
-                ("🎶 M3U Playlists", "M3U"),
+                ("🎶 M3U ARTIST Playlists", "M3U ARTIST"),
+                ("🎶 M3U MIX Playlists", "M3U MIX"),
                 ("📺 .tv Bouquets", "TV"),
                 ("📻 Radio Lists", "RADIO"),
             ]
@@ -2883,8 +2884,10 @@ class CiefpVibesMain(Screen):
         if not choice:
             return
         cat = choice[1]
-        if cat == "M3U":
-            url = GITHUB_M3U_URL
+        if cat == "M3U ARTIST":
+            url = GITHUB_M3U_ARTIST_URL
+        elif cat == "M3U MIX":
+            url = GITHUB_M3U_MIX_URL
         elif cat == "TV":
             url = GITHUB_TV_URL
         elif cat == "RADIO":
