@@ -27,7 +27,7 @@ from urllib.parse import unquote
 
 PLUGIN_NAME = "CiefpVibes"
 PLUGIN_DESC = "Jukebox play music locally and online"
-PLUGIN_VERSION = "1.7"  # POVECANA VERZIJA
+PLUGIN_VERSION = "1.8"  # POVECANA VERZIJA
 PLUGIN_DIR = os.path.dirname(__file__) or "/usr/lib/enigma2/python/Plugins/Extensions/CiefpVibes"
 CACHE_DIR = "/tmp/ciefpvibes_cache"
 os.makedirs(CACHE_DIR, exist_ok=True)
@@ -78,6 +78,9 @@ class CiefpVibesMain(Screen):
         return '''<?xml version="1.0" encoding="utf-8"?>
         <screen position="0,0" size="1920,1080" flags="wfNoBorder" backgroundColor="transparent">
             <ePixmap pixmap="%s/backgrounds/%s" position="0,0" size="1920,1080" alphatest="blend" zPosition="-1"/>
+            <widget name="source_label" position="50,50" size="1150,45"
+        font="Regular;42" foregroundColor="#FFFFFF"
+        transparent="1" zPosition="4"/>
             <widget source="playlist" render="Listbox" position="50,100" size="1150,770" transparent="1" scrollbarMode="showOnDemand" selectionPixmap="skin_default/sel.png" zPosition="2">
                 <convert type="TemplatedMultiContent">
                     {"template": [
@@ -160,6 +163,7 @@ class CiefpVibesMain(Screen):
         self.network_timeout = 30
         self["playlist"] = List([])
         self["nowplaying"] = Label("🌀 Loading...")
+        self["source_label"] = Label("")
         self["key_red"] = Label("🔴 EXIT")
         self["key_green"] = Label("🟢 FOLDER")
         self["key_yellow"] = Label("🟡 SETTINGS")
@@ -235,7 +239,34 @@ class CiefpVibesMain(Screen):
             self["time"].setText(t)
         except:
             pass
-            
+
+    def setSourceLabel(self, filepath="", display_name=""):
+        """Prikazuje samo naziv (bez Online/Local), sa skraćivanjem dugih naziva."""
+        try:
+            if "source_label" not in self:
+                return
+
+            name = (display_name or "").strip()
+
+            # Ako nema display_name, izvuci iz putanje
+            if not name and filepath:
+                name = os.path.basename(filepath).strip()
+
+            # Ukloni ekstenzije radi lepšeg prikaza
+            for ext in (".m3u", ".m3u8", ".pls", ".txt"):
+                if name.lower().endswith(ext):
+                    name = name[:-len(ext)].strip()
+
+            # Skraćivanje dugih naziva
+            MAX_LEN = 65  # slobodno povećaj na 70-80 ako staje na tvom skinu
+            if len(name) > MAX_LEN:
+                name = name[:MAX_LEN - 3] + "..."
+
+            self["source_label"].setText(name)
+
+        except Exception as e:
+            print(f"[CiefpVibes] setSourceLabel error: {e}")
+
     def setupPosterTimer(self):
         """Postavi callback za poster timer (zamenjeno od ranije)"""
         print(f"[CiefpVibes] Poster timer setup")
@@ -807,22 +838,48 @@ class CiefpVibesMain(Screen):
 
     # === POSTER METODE ===
     def showDefaultPoster(self):
-        # Ovu funkciju zovemo samo kada želimo namerno prikazati default poster
+        # Ako već prikazujemo PRAVI poster (nije default), ne vraćaj na default
+        default_posters = [f"poster{i}.png" for i in range(1, 11)]
+        if self.current_poster_path and os.path.basename(self.current_poster_path) not in default_posters:
+            print("[CiefpVibes-DEBUG] showDefaultPoster blocked (keeping non-default cover)")
+            return
+
+        # Putanja do trenutnog default postera (placeholder)
         default_poster = os.path.join(PLUGIN_DIR, "posters", self.current_poster)
 
-        # Proveri da li već prikazujemo default poster
+        # Ako već prikazujemo baš taj default, ne radi ništa
         if self.current_poster_path == default_poster:
             return
 
+        # Prikaži default poster
         self.showPoster(default_poster)
 
         # Resetuj zaključavanje kada prikazujemo default poster
         self.poster_locked = False
         self.poster_change_count = 0
 
-        # Postavi callback za timer ako nije već postavljen
-        if not self.poster_search_timer.callback:
-            self.poster_search_timer.callback.append(self.delayedPosterSearch)
+        # Postavi callback za poster search timer ako nije već postavljen
+        try:
+            if not self.poster_search_timer.callback:
+                self.poster_search_timer.callback.append(self.delayedPosterSearch)
+        except Exception as e:
+            print(f"[CiefpVibes-DEBUG] poster_search_timer callback error: {e}")
+
+        # Retry iz cache-a posle 2.5s (jedan pokušaj)
+        try:
+            if not hasattr(self, "cache_retry_timer") or self.cache_retry_timer is None:
+                self.cache_retry_timer = eTimer()
+
+            # Dodaj callback samo jednom
+            if self.retryPosterFromCache not in self.cache_retry_timer.callback:
+                self.cache_retry_timer.callback.append(self.retryPosterFromCache)
+
+            # Restart timer
+            self.cache_retry_timer.stop()
+            self.cache_retry_timer.start(2500, True)  # 2500ms = 2.5s
+            print("[CiefpVibes-DEBUG] Cache retry timer started")
+        except Exception as e:
+            print(f"[CiefpVibes-DEBUG] Cache retry timer error: {e}")
 
     def showPoster(self, path):
         print(f"[CiefpVibes-DEBUG] showPoster called with path: {path}")
@@ -1066,6 +1123,7 @@ class CiefpVibesMain(Screen):
             if not os.path.isfile(filepath):
                 self.session.open(MessageBox, f"File does not exist:\n{filepath}", MessageBox.TYPE_ERROR)
                 return
+            self.setSourceLabel(filepath, display_name)
             self.loadPlaylistFromFile(filepath, display_name)
 
     def loadPlaylistFromFile(self, filepath, display_name="Lista"):
@@ -1120,7 +1178,8 @@ class CiefpVibesMain(Screen):
             self["nowplaying"].setText(f"🎵 {self.playlist[0][0]}")
         else:
             self["nowplaying"].setText(f"📁 {display_name} • {len(self.playlist)} pesama")
-        
+        # === DODAJ OVO ===
+        self.setSourceLabel(filepath, display_name)
         self.saveLastPlaylist(filepath, display_name)
         self.playCurrent()
 
@@ -1305,6 +1364,7 @@ class CiefpVibesMain(Screen):
         welcome_url = "https://raw.githubusercontent.com/ciefp/CiefpVibesFiles/main/TV/userbouquet.ciefpvibes_welcome.tv"
         tmp_path = "/tmp/ciefpvibes_welcome.tv"
         self["nowplaying"].setText("🌐 Loading welcome playlist...")
+        self.setSourceLabel(tmp_path, "Welcome Playlist")
 
         try:
             urllib.request.urlretrieve(welcome_url, tmp_path)
@@ -1486,6 +1546,76 @@ class CiefpVibesMain(Screen):
         print(f"[CiefpVibes] No cover found for {artist} - {title}")
         return None
 
+    def findCoverInCacheOnly(self, artist, title):
+        """Traži cover SAMO u /tmp/ciefpvibes_cache (bez interneta)."""
+
+        def clean_string(text):
+            if not text:
+                return ""
+            import re
+            text = re.sub(r'[<>:"/\\|?*]', '', text)
+            return text.strip()
+
+        clean_artist = clean_string(artist)
+        clean_title = clean_string(title)
+
+        cache_dir = CACHE_DIR
+        if not os.path.exists(cache_dir):
+            return None
+
+        for filename in os.listdir(cache_dir):
+            if not filename.lower().endswith(('.jpg', '.jpeg', '.png')):
+                continue
+
+            full_path = os.path.join(cache_dir, filename)
+            if (not os.path.isfile(full_path)) or os.path.getsize(full_path) < 1024:
+                continue
+
+            filename_lower = filename.lower()
+
+            if clean_artist and clean_title:
+                artist_words = [w for w in clean_artist.lower().split() if len(w) > 2]
+                title_words = [w for w in clean_title.lower().split() if len(w) > 2]
+                artist_match = any(w in filename_lower for w in artist_words)
+                title_match = any(w in filename_lower for w in title_words)
+                if artist_match and title_match:
+                    return full_path
+                if artist_match or title_match:
+                    return full_path
+
+            elif clean_title:
+                title_words = [w for w in clean_title.lower().split() if len(w) > 2]
+                if title_words and any(w in filename_lower for w in title_words):
+                    return full_path
+
+            elif clean_artist:
+                artist_words = [w for w in clean_artist.lower().split() if len(w) > 2]
+                if artist_words and any(w in filename_lower for w in artist_words):
+                    return full_path
+
+        return None
+
+    def retryPosterFromCache(self):
+        """Poziva se kad je prikazan placeholder: pokuša još jednom poster iz cache."""
+        # Retry samo ako i dalje prikazujemo default/placeholder
+        default_posters = [f"poster{i}.png" for i in range(1, 11)]
+        if not self.current_poster_path or os.path.basename(self.current_poster_path) not in default_posters:
+            print("[CiefpVibes-DEBUG] Cache retry skipped (not on default anymore)")
+            return
+
+        artist = self.current_song_info.get("artist", "")
+        title = self.current_song_info.get("title", "")
+
+        cover = self.findCoverInCacheOnly(artist, title)
+        if cover and os.path.isfile(cover):
+            print(f"[CiefpVibes-DEBUG] Cache retry found cover: {cover}")
+            # Otključaj da bi showPoster mogao da zameni default
+            self.poster_locked = False
+            self.poster_change_count = 0
+            self.showPoster(cover)
+        else:
+            print("[CiefpVibes-DEBUG] Cache retry: no cover in cache")
+
     def getCacheSize(self):
         try:
             total_size = 0
@@ -1521,7 +1651,6 @@ class CiefpVibesMain(Screen):
         # RESETUJ kontrolu postera za novu pesmu
         self.poster_locked = False
         self.poster_change_count = 0
-        self.current_poster_path = ""
 
         # Resetuj folder cover keš za novu pesmu
         # (ovo će forsirati ponovno traženje lokalnog postera)
@@ -1533,6 +1662,10 @@ class CiefpVibesMain(Screen):
         is_local_file = url.startswith('/') or url.startswith('file://')
         # Da li je online stream?
         is_online_stream = url.startswith('http://') or url.startswith('https://')
+
+        if is_local_file:
+            self.current_poster_path = ""
+        # ako je online stream -> ostavi current_poster_path kakav jeste
 
         # ZA ONLINE STREAM, POSTAVI POSEBNA PRAVILA
         if is_online_stream:
@@ -2087,8 +2220,17 @@ class CiefpVibesMain(Screen):
                 self.lock_timer.start(3000, True)  # 3000ms = 3s
                 print(f"[CiefpVibes-DEBUG] Setting lock timer for 3 seconds...")
         else:
-            # Ako nije nađen poster, prikaži default
+            # Ako nije nađen poster:
+            # - ako već prikazujemo NE-default (pravi) poster, NE diraj ga
+            default_posters = [f"poster{i}.png" for i in range(1, 11)]
+
+            if self.current_poster_path and os.path.basename(self.current_poster_path) not in default_posters:
+                print("[CiefpVibes-DEBUG] Cover not found, keeping existing non-default poster")
+                return
+
+            # inače (ako nemamo ništa ili već je default) pokaži default
             self.showDefaultPoster()
+
 
     def delayedPosterSearch(self):
         """Traži poster 10 sekundi nakon promene pesme (za online radio)"""
@@ -2953,6 +3095,8 @@ class CiefpVibesMain(Screen):
         try:
             urllib.request.urlretrieve(dl_url, tmp_path)
             print(f"[CiefpVibes] Downloaded: {filename}")
+            self.setSourceLabel(tmp_path, display_name)
+
             
             # Debug: pročitaj prvih nekoliko linija
             with open(tmp_path, "r", encoding="utf-8", errors="ignore") as f:
