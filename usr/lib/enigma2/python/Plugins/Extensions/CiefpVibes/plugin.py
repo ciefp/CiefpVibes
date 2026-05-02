@@ -9,6 +9,7 @@ import urllib.request
 import uuid
 import time
 import urllib.parse
+from ftplib import FTP
 from Components.ActionMap import ActionMap
 from Components.Label import Label
 from Components.Sources.List import List
@@ -24,10 +25,22 @@ from Tools.Directories import fileExists
 from enigma import eServiceReference, eTimer, iPlayableService, gFont, iServiceInformation, RT_HALIGN_LEFT, RT_VALIGN_CENTER, eConsoleAppContainer
 from Plugins.Plugin import PluginDescriptor
 from urllib.parse import unquote
+from Components.config import config, ConfigSelection, ConfigSubsection
+
+# TMP cache config
+config.plugins.ciefpTmpCache = ConfigSubsection()
+config.plugins.ciefpTmpCache.auto_clear = ConfigSelection(default="500", choices=[
+    ("0", "Disabled"),
+    ("100", "100 MB"),
+    ("200", "200 MB"),
+    ("500", "500 MB"),
+    ("1000", "1 GB"),
+    ("2000", "2 GB")
+])
 
 PLUGIN_NAME = "CiefpVibes"
 PLUGIN_DESC = "Jukebox play music locally and online"
-PLUGIN_VERSION = "1.8"  # POVECANA VERZIJA
+PLUGIN_VERSION = "1.9"
 PLUGIN_DIR = os.path.dirname(__file__) or "/usr/lib/enigma2/python/Plugins/Extensions/CiefpVibes"
 CACHE_DIR = "/tmp/ciefpvibes_cache"
 os.makedirs(CACHE_DIR, exist_ok=True)
@@ -81,7 +94,7 @@ class CiefpVibesMain(Screen):
             <widget name="source_label" position="50,50" size="1150,45"
         font="Regular;42" foregroundColor="#FFFFFF"
         transparent="1" zPosition="4"/>
-            <widget source="playlist" render="Listbox" position="50,100" size="1150,770" transparent="1" scrollbarMode="showOnDemand" selectionPixmap="skin_default/sel.png" zPosition="2">
+            <widget source="playlist" render="Listbox" position="50,100" size="1150,770" transparent="1" scrollbarMode="showOnDemand" zPosition="2">
                 <convert type="TemplatedMultiContent">
                     {"template": [
                         MultiContentEntryText(pos=(20, 5), size=(1080, 36), font=0, flags=RT_HALIGN_LEFT|RT_VALIGN_CENTER, text=0),
@@ -152,6 +165,14 @@ class CiefpVibesMain(Screen):
         # Timer za zaključavanje postera
         self.lock_timer = eTimer()
         self.lock_timer.callback.append(self.lockCurrentPoster)
+
+        #FTP konekcija
+        self.ftp_ip = "192.168.1."
+        self.ftp_port = "2121"
+        self.ftp_user = "root"
+        self.ftp_pass = "admin"
+        self.ftp_current_path = "/"
+        self.is_ftp_mode = False  # Pratimo da li smo u FTP modu
 
         self.skin = self.buildSkin()
         Screen.__init__(self, session)
@@ -471,7 +492,70 @@ class CiefpVibesMain(Screen):
         else:
             self["update_status"].setText("")
             self["update_status"].hide()
-                
+
+# ==== TMP cache manage ===
+    def get_tmp_cache_size(self):
+        """Vraća veličinu TMP cache-a u MB"""
+        try:
+            total_size = 0
+            # FTP cache folder
+            ftp_cache = "/tmp/ciefpvibes_ftp_cache"
+            if os.path.exists(ftp_cache):
+                for f in os.listdir(ftp_cache):
+                    fp = os.path.join(ftp_cache, f)
+                    if os.path.isfile(fp):
+                        total_size += os.path.getsize(fp)
+
+            # ciefp_ prefiks fajlovi u /tmp
+            for f in os.listdir("/tmp"):
+                if f.startswith("ciefp_") and os.path.isfile(os.path.join("/tmp", f)):
+                    total_size += os.path.getsize(os.path.join("/tmp", f))
+
+            return round(total_size / (1024 * 1024), 1)
+        except:
+            return 0
+
+    def clear_tmp_cache(self):
+        """Briše sve TMP cache fajlove"""
+        try:
+            count = 0
+            # Briši FTP cache folder
+            ftp_cache = "/tmp/ciefpvibes_ftp_cache"
+            if os.path.exists(ftp_cache):
+                for f in os.listdir(ftp_cache):
+                    file_path = os.path.join(ftp_cache, f)
+                    try:
+                        if os.path.isfile(file_path):
+                            os.unlink(file_path)
+                            count += 1
+                    except:
+                        pass
+
+            # Briši ciefp_ prefiks fajlove u /tmp
+            for f in os.listdir("/tmp"):
+                if f.startswith("ciefp_") and os.path.isfile(os.path.join("/tmp", f)):
+                    try:
+                        os.unlink(os.path.join("/tmp", f))
+                        count += 1
+                    except:
+                        pass
+
+            return True, count
+        except Exception as e:
+            print(f"[CiefpVibes] Error clearing TMP cache: {e}")
+            return False, 0
+
+    def check_and_clear_tmp_cache(self):
+        """Automatski čisti TMP cache ako pređe limit"""
+        limit_mb = int(config.plugins.ciefpTmpCache.auto_clear.value)
+        if limit_mb == 0:
+            return
+
+        current_size = self.get_tmp_cache_size()
+        if current_size > limit_mb:
+            self.clear_tmp_cache()
+            print(f"[CiefpVibes] TMP cache auto-cleared at {current_size}MB (limit {limit_mb}MB)")
+                                
     # === MREŽNE METODE ===
     
     def openNetworkMenu(self):
@@ -483,6 +567,7 @@ class CiefpVibesMain(Screen):
             ChoiceBox,
             title="🌐 Network Options",
             list=[
+                ("📱 Connect to Phone (Android FTP)", "connect_phone"),
                 ("💻 Connect to Laptop (SMB)", "connect_laptop"),
                 ("📡 Browse Network", "browse_network"),
                 ("➕ Add Network Share", "add_share"),
@@ -494,8 +579,9 @@ class CiefpVibesMain(Screen):
     def networkMenuSelected(self, choice):
         if not choice:
             return
-        
-        if choice[1] == "connect_laptop":
+        if choice[1] == "connect_phone":
+            self.connectToPhone()
+        elif choice[1] == "connect_laptop":
             self.connectToLaptop()
         elif choice[1] == "browse_network":
             self.browseNetworkShares()
@@ -505,7 +591,370 @@ class CiefpVibesMain(Screen):
             self.disconnectNetwork()
         elif choice[1] == "autoscan":
             self.autoScanNetwork()
-    
+
+    def connectToPhone(self):
+        """Korak 1: Unos IP adrese"""
+        from Screens.VirtualKeyBoard import VirtualKeyBoard
+        self.session.openWithCallback(
+            self.phoneIPEntered,
+            VirtualKeyBoard,
+            title="Enter Phone FTP IP:",
+            text=self.ftp_ip
+        )
+
+    def phoneIPEntered(self, res):
+        if res:
+            self.ftp_ip = res
+            """Korak 2: Unos Porta"""
+            from Screens.VirtualKeyBoard import VirtualKeyBoard
+            self.session.openWithCallback(
+                self.phonePortEntered,
+                VirtualKeyBoard,
+                title="Enter FTP Port:",
+                text=self.ftp_port
+            )
+
+    def phonePortEntered(self, res):
+        if res:
+            self.ftp_port = res
+            """Korak 3: Unos Korisničkog imena"""
+            from Screens.VirtualKeyBoard import VirtualKeyBoard
+            self.session.openWithCallback(
+                self.phoneUserEntered,
+                VirtualKeyBoard,
+                title="Enter FTP Username:",
+                text=self.ftp_user
+            )
+
+    def phoneUserEntered(self, res):
+        if res:
+            self.ftp_user = res
+            """Korak 4: Unos Lozinke"""
+            from Screens.VirtualKeyBoard import VirtualKeyBoard
+            self.session.openWithCallback(
+                self.phonePassEntered,
+                VirtualKeyBoard,
+                title="Enter FTP Password:",
+                text=self.ftp_pass
+            )
+
+            
+    def phonePassEntered(self, res):
+        if res:
+            self.ftp_pass = res
+            # Direktno učitaj FTP sadržaj, bez dodatnog menija (kao u PicturePlayer)
+            self.loadPhoneFTPContent("/")
+
+    def ftpActionSelected(self, choice):
+        if not choice:
+            return
+
+        if choice[1] == "scan":
+            self.loadPhoneFTPPlaylist("/")
+        else:
+            # Otvori browser za ručno biranje
+            self.session.openWithCallback(
+                self.fileBrowserClosed,
+                CiefpFileBrowser,
+                initial_dir="/",
+                mode="ftp",
+                ftp_data={
+                    "ip": self.ftp_ip,
+                    "port": self.ftp_port,
+                    "user": self.ftp_user,
+                    "pass": self.ftp_pass
+                }
+            )
+
+    def loadPhoneFTPPlaylist(self, remote_path):
+        """Učitaj MP3 fajlove sa FTP telefona direktno u playlistu"""
+        self["nowplaying"].setText(f"📱 Connecting to {self.ftp_ip}...")
+        self.setSourceLabel("", f"FTP: {self.ftp_ip}")
+
+        try:
+            from ftplib import FTP
+            ftp = FTP()
+            ftp.connect(self.ftp_ip, int(self.ftp_port), timeout=10)
+            ftp.login(self.ftp_user, self.ftp_pass)
+            ftp.set_pasv(True)
+
+            self.playlist = []
+
+            # Rekurzivno skeniranje foldera za MP3 fajlove
+            self.scan_ftp_folder(ftp, remote_path)
+
+            ftp.quit()
+
+            if self.playlist:
+                # Sortiraj po imenu
+                self.playlist.sort(key=lambda x: x[0].lower())
+
+                self["playlist"].setList(self.playlist)
+                self["playlist"].index = 0
+                self.currentIndex = 0
+
+                self["nowplaying"].setText(f"📱 Phone • {len(self.playlist)} songs")
+                self.playCurrent()
+            else:
+                self.session.open(MessageBox, "No MP3 files found on phone!", MessageBox.TYPE_WARNING)
+                self["nowplaying"].setText("No music found")
+
+        except Exception as e:
+            print(f"[CiefpVibes] FTP error: {e}")
+            self.session.open(MessageBox, f"FTP Error:\n{str(e)}", MessageBox.TYPE_ERROR)
+            self["nowplaying"].setText("Connection failed")
+
+    def scan_ftp_folder(self, ftp, path):
+        """Rekurzivno skenira FTP folder za MP3 fajlove"""
+        try:
+            # Sačuvaj trenutnu putanju
+            current = ftp.pwd()
+
+            # Pokušaj da uđeš u folder
+            try:
+                ftp.cwd(path)
+            except:
+                return
+
+            # Dohvati listu stavki
+            items = []
+            ftp.retrlines('LIST', items.append)
+
+            for line in items:
+                if line.startswith('d'):
+                    # Ovo je folder - uđi u njega
+                    parts = line.split()
+                    if len(parts) >= 9:
+                        folder_name = " ".join(parts[8:])
+                        if folder_name not in ('.', '..'):
+                            try:
+                                self.scan_ftp_folder(ftp, folder_name)
+                            except:
+                                pass
+                elif line.startswith('-'):
+                    # Ovo je fajl - proveri da li je MP3
+                    parts = line.split()
+                    if len(parts) >= 9:
+                        filename = " ".join(parts[8:])
+                        if filename.lower().endswith(('.mp3', '.flac', '.m4a', '.aac', '.wav', '.ogg')):
+                            # Napravi FTP URL sa kredencijalima
+                            current_path = ftp.pwd()
+                            if current_path == '/':
+                                full_path = '/' + filename
+                            else:
+                                full_path = current_path + '/' + filename
+
+                            # FTP URL
+                            url = f"ftp://{self.ftp_user}:{self.ftp_pass}@{self.ftp_ip}:{self.ftp_port}{full_path}"
+
+                            # Ime za prikaz
+                            song_name = os.path.splitext(filename)[0].replace('_', ' ').replace('-', ' - ')
+
+                            self.playlist.append((song_name, url))
+                            print(f"[FTP] Found: {song_name}")
+
+            # Vrati se nazad
+            ftp.cwd(current)
+
+        except Exception as e:
+            print(f"[FTP] Scan error in {path}: {e}")
+
+    def loadPhoneFTPContent(self, remote_path):
+        """Učitaj MP3 fajlove sa FTP telefona - SKIDA SVE ODMAH"""
+        self["nowplaying"].setText(f"📱 Connecting to {self.ftp_ip}...")
+        self.setSourceLabel("", f"FTP: {self.ftp_ip}")
+
+        try:
+            from ftplib import FTP
+            ftp = FTP()
+            ftp.connect(self.ftp_ip, int(self.ftp_port), timeout=10)
+            ftp.login(self.ftp_user, self.ftp_pass)
+            ftp.set_pasv(True)
+
+            self.playlist = []
+            audio_extensions = (".mp3", ".flac", ".m4a", ".aac", ".wav", ".ogg")
+
+            # Kreiraj folder za keširanje FTP fajlova
+            ftp_cache_dir = "/tmp/ciefpvibes_ftp_cache"
+            os.makedirs(ftp_cache_dir, exist_ok=True)
+
+            # Rekurzivno skeniranje i skidanje
+            self.scan_and_download_ftp(ftp, remote_path, audio_extensions, ftp_cache_dir)
+
+            ftp.quit()
+
+            if self.playlist:
+                self["playlist"].setList(self.playlist)
+                self["playlist"].index = 0
+                self.currentIndex = 0
+                self["nowplaying"].setText(f"📱 Phone • {len(self.playlist)} songs")
+                self.playCurrent()
+            else:
+                self.session.open(MessageBox, "No audio files found!", MessageBox.TYPE_WARNING)
+
+        except Exception as e:
+            print(f"[CiefpVibes] FTP error: {e}")
+            self.session.open(MessageBox, f"FTP Error:\n{str(e)}", MessageBox.TYPE_ERROR)
+
+    def scan_and_download_ftp(self, ftp, folder_path, audio_extensions, cache_dir):
+        """Skenira FTP folder i skida MP3 fajlove"""
+        try:
+            current = ftp.pwd()
+            ftp.cwd(folder_path)
+
+            listing = []
+            ftp.retrlines('LIST', listing.append)
+
+            for line in listing:
+                parts = line.split(None, 8)
+                if len(parts) < 9:
+                    continue
+                name = parts[8].strip()
+                if name in (".", ".."):
+                    continue
+
+                is_dir = parts[0].startswith('d')
+
+                if is_dir:
+                    if folder_path.endswith('/'):
+                        new_path = folder_path + name
+                    else:
+                        new_path = folder_path + '/' + name
+                    self.scan_and_download_ftp(ftp, new_path, audio_extensions, cache_dir)
+                else:
+                    ext = os.path.splitext(name)[1].lower()
+                    if ext in audio_extensions:
+                        # Napravi jedinstveno ime za keš
+                        import hashlib
+                        full_path = folder_path + '/' + name if not folder_path.endswith('/') else folder_path + name
+                        cache_name = hashlib.md5(full_path.encode()).hexdigest() + ext
+                        local_path = os.path.join(cache_dir, cache_name)
+
+                        # Skini fajl ako ne postoji u kešu
+                        if not os.path.exists(local_path):
+                            self["nowplaying"].setText(f"📥 Downloading: {name}...")
+                            with open(local_path, "wb") as f:
+                                ftp.retrbinary(f"RETR {name}", f.write)
+                            print(f"[FTP] Downloaded: {name}")
+
+                        song_name = os.path.splitext(name)[0].replace("_", " ").replace("-", " - ")
+                        self.playlist.append((song_name, local_path))
+
+            ftp.cwd(current)
+
+        except Exception as e:
+            print(f"[FTP] Scan error: {e}")
+
+    def download_ftp_file(self, ftp_url):
+        """Skida fajl sa FTP servera i vraća lokalnu putanju"""
+        try:
+            from urllib.parse import urlparse
+            import tempfile
+
+            # Parsiraj FTP URL
+            parsed = urlparse(ftp_url)
+            # ftp://user:pass@host:port/path/to/file.mp3
+            host = parsed.hostname
+            port = parsed.port or 21
+            user = parsed.username or "anonymous"
+            password = parsed.password or ""
+            path = parsed.path
+
+            print(f"[FTP] Downloading: {path}")
+            self["nowplaying"].setText(f"📥 Downloading: {os.path.basename(path)}...")
+
+            # Poveži se na FTP
+            from ftplib import FTP
+            ftp = FTP()
+            ftp.connect(host, port, timeout=15)
+            ftp.login(user, password)
+            ftp.set_pasv(True)
+
+            # Kreiraj privremeni fajl
+            ext = os.path.splitext(path)[1]
+            fd, local_path = tempfile.mkstemp(suffix=ext, prefix="ciefp_", dir="/tmp")
+            os.close(fd)
+
+            # Skini fajl
+            with open(local_path, "wb") as f:
+                ftp.retrbinary(f"RETR {path}", f.write, blocksize=8192)
+
+            ftp.quit()
+
+            print(f"[FTP] Download complete: {local_path}")
+            return local_path
+
+        except Exception as e:
+            print(f"[FTP] Download error: {e}")
+            self.session.open(MessageBox, f"Download failed:\n{str(e)}", MessageBox.TYPE_ERROR)
+            return None
+
+    def scan_ftp_folder_for_audio(self, ftp, folder_path, audio_extensions):
+        """Rekurzivno skenira FTP folder za audio fajlove"""
+        try:
+            current = ftp.pwd()
+            ftp.cwd(folder_path)
+
+            listing = []
+            ftp.retrlines('LIST', listing.append)
+
+            for line in listing:
+                parts = line.split(None, 8)
+                if len(parts) < 9:
+                    continue
+                name = parts[8].strip()
+                if name in (".", ".."):
+                    continue
+
+                is_dir = parts[0].startswith('d')
+
+                if is_dir:
+                    # Rekurzivno skeniraj podfolder
+                    if folder_path.endswith('/'):
+                        new_path = folder_path + name
+                    else:
+                        new_path = folder_path + '/' + name
+                    self.scan_ftp_folder_for_audio(ftp, new_path, audio_extensions)
+                else:
+                    ext = os.path.splitext(name)[1].lower()
+                    if ext in audio_extensions:
+                        if folder_path.endswith('/'):
+                            full_path = folder_path + name
+                        else:
+                            full_path = folder_path + '/' + name
+
+                        url = f"ftp://{self.ftp_user}:{self.ftp_pass}@{self.ftp_ip}:{self.ftp_port}{full_path}"
+                        song_name = os.path.splitext(name)[0].replace("_", " ").replace("-", " - ")
+                        self.playlist.append((song_name, url))
+                        print(f"[FTP] Found in subfolder: {song_name}")
+
+            ftp.cwd(current)
+
+        except Exception as e:
+            print(f"[FTP] Scan error: {e}")
+
+    # Ovo je opcioni meni - možeš ga dodati ako želiš
+    def phonePassEnteredWithMenu(self, res):
+        if res:
+            self.ftp_pass = res
+            # Koristi MessageBox umesto ChoiceBox da izbegneš modal error
+            self.session.openWithCallback(
+                self.ftpActionSelected,
+                MessageBox,
+                "FTP Phone Connected!\n\nSelect option:",
+                [
+                    ("Scan all folders for music", 1),
+                    ("Browse folders manually", 2)
+                ]
+            )
+
+    def ftpActionSelected(self, result):
+        if result == 1:
+            self.loadPhoneFTPContent("/")
+        elif result == 2:
+            # Ovo zahteva ispravan CiefpFileBrowser - za sada koristi scan
+            self.loadPhoneFTPContent("/")
+
     def connectToLaptop(self):
         """Poveži se sa laptop-om"""
         from Screens.VirtualKeyBoard import VirtualKeyBoard
@@ -792,11 +1241,13 @@ class CiefpVibesMain(Screen):
             self.laptopIPEntered(choice[1])
 
     # === FILE BROWSER METODE ===
-    
     def openFileBrowser(self):
-        """Otvori file browser"""
+        """Otvori file browser - originalna radna verzija"""
         from Screens.ChoiceBox import ChoiceBox
-        
+
+        # Izračunaj broj fajlova u TMP folderu
+        tmp_files_count = self.count_tmp_audio_files()
+
         self.session.openWithCallback(
             self.browserTypeSelected,
             ChoiceBox,
@@ -805,13 +1256,33 @@ class CiefpVibesMain(Screen):
                 ("💾 Local Storage", "local"),
                 ("💻 Network (Laptop)", "network"),
                 ("📡 Online Streams", "online"),
+                (f"🗑️ TMP/FTP Files ({tmp_files_count} files)", "tmp"),
             ]
         )
-    
+        
+    def count_tmp_audio_files(self):
+        """Broji audio fajlove u /tmp/ciefpvibes_ftp_cache i /tmp"""
+        count = 0
+        audio_extensions = (".mp3", ".flac", ".m4a", ".aac", ".wav", ".ogg")
+
+        # Broji u FTP cache folderu
+        ftp_cache = "/tmp/ciefpvibes_ftp_cache"
+        if os.path.exists(ftp_cache):
+            for f in os.listdir(ftp_cache):
+                if f.lower().endswith(audio_extensions):
+                    count += 1
+
+        # Broji i direktno u /tmp (ciefp_ prefiks)
+        for f in os.listdir("/tmp"):
+            if f.startswith("ciefp_") and f.lower().endswith(audio_extensions):
+                count += 1
+
+        return count
+
     def browserTypeSelected(self, choice):
         if not choice:
             return
-        
+
         if choice[1] == "local":
             self.session.openWithCallback(
                 self.localLocationSelected,
@@ -820,14 +1291,64 @@ class CiefpVibesMain(Screen):
                 list=[
                     ("📁 Media/HDD", "/media/hdd"),
                     ("📁 USB", "/media/usb"),
+                    ("📁 USB2", "/media/usb2"),
                     ("📁 Root", "/"),
+                    ("📁 Home", "/home/root"),
                 ]
             )
         elif choice[1] == "network":
             self.openNetworkMenu()
         elif choice[1] == "online":
             self.openGitHubLists()
-    
+        elif choice[1] == "tmp":
+            self.loadTmpFiles()
+
+    def loadTmpFiles(self):
+        """Učitava sve audio fajlove iz /tmp i FTP cache foldera"""
+        self.check_and_clear_tmp_cache()
+
+        self.playlist = []
+        audio_extensions = (".mp3", ".flac", ".m4a", ".aac", ".wav", ".ogg")
+
+        # Lista za čuvanje svih fajlova
+        tmp_files = []
+
+        # 1. FTP cache folder
+        ftp_cache = "/tmp/ciefpvibes_ftp_cache"
+        if os.path.exists(ftp_cache):
+            for f in os.listdir(ftp_cache):
+                if f.lower().endswith(audio_extensions):
+                    full_path = os.path.join(ftp_cache, f)
+                    # Pokušaj da izvučeš originalno ime iz MD5? Ne možemo, koristi MD5 kao ime
+                    song_name = os.path.splitext(f)[0][:20]  # Prvih 20 karaktera MD5
+                    tmp_files.append((song_name, full_path, os.path.getmtime(full_path)))
+
+        # 2. Direktno /tmp sa ciefp_ prefiksom
+        for f in os.listdir("/tmp"):
+            if f.startswith("ciefp_") and f.lower().endswith(audio_extensions):
+                full_path = os.path.join("/tmp", f)
+                # Pokušaj da izvučeš originalno ime iz fajla?
+                # Pošto je hash, koristi deo hasha
+                song_name = f.replace("ciefp_", "")[:30]
+                tmp_files.append((song_name, full_path, os.path.getmtime(full_path)))
+
+        # Sortiraj po vremenu (najnoviji prvi)
+        tmp_files.sort(key=lambda x: x[2], reverse=True)
+
+        # Dodaj u playlistu
+        for song_name, full_path, _ in tmp_files:
+            self.playlist.append((song_name, full_path))
+
+        if self.playlist:
+            self["playlist"].setList(self.playlist)
+            self["playlist"].index = 0
+            self.currentIndex = 0
+            self.setSourceLabel("", f"🗑️ TMP Files ({len(self.playlist)} files)")
+            self["nowplaying"].setText(f"🗑️ TMP Files • {len(self.playlist)} songs")
+            self.playCurrent()
+        else:
+            self.session.open(MessageBox, "No temporary audio files found!", MessageBox.TYPE_WARNING)
+
     def localLocationSelected(self, choice):
         if choice:
             self.session.openWithCallback(
@@ -835,6 +1356,24 @@ class CiefpVibesMain(Screen):
                 CiefpFileBrowser,
                 initial_dir=choice[1]
             )
+
+    def fileBrowserClosed(self, result):
+        if not result:
+            return
+
+        # FTP folder load
+        if isinstance(result, tuple) and result[0] == "__folder__":
+            self.playlist = result[1]
+            self["playlist"].list = self.playlist
+            self.currentIndex = 0
+            self.playCurrent()
+            return
+
+        # normal file / m3u
+        path, name = result
+
+        if path:
+            self.loadPlaylistFromFile(path, name)
 
     # === POSTER METODE ===
     def showDefaultPoster(self):
@@ -1645,6 +2184,23 @@ class CiefpVibesMain(Screen):
 
     # === PLAYBACK ===
     def playCurrent(self):
+        if not self.playlist or not (0 <= self.currentIndex < len(self.playlist)):
+            return
+
+        name, url = self.playlist[self.currentIndex]
+
+        # === NOVO: OBRADA FTP URL-ova ===
+        if url.startswith('ftp://'):
+            print(f"[CiefpVibes] FTP file detected: {url}")
+            # Skini fajl lokalno pre sviranja
+            local_path = self.download_ftp_file(url)
+            if local_path:
+                # Zameni URL sa lokalnom putanjom
+                url = local_path
+                print(f"[CiefpVibes] Downloaded to: {local_path}")
+            else:
+                self["nowplaying"].setText(f"⚠ Download failed: {name}")
+                return
         if not self.playlist or not (0 <= self.currentIndex < len(self.playlist)):
             return
 
@@ -2678,7 +3234,104 @@ class CiefpVibesMain(Screen):
             print(f"[CiefpVibes] MP4 parse error: {e}")
 
         return {"artist": "", "title": "", "album": ""}
-        
+
+    def read_ogg_tags(self, filepath):
+        """Parsira OGG Vorbis komentare"""
+        try:
+            with open(filepath, 'rb') as f:
+                # Proveri OGG header
+                header = f.read(4)
+                if header != b'OggS':
+                    return {"artist": "", "title": "", "album": ""}
+
+                artist = ""
+                title = ""
+                album = ""
+
+                # Traži Vorbis comment packet
+                while True:
+                    # Čitaj page header
+                    page_header = f.read(27)
+                    if len(page_header) < 27:
+                        break
+
+                    # Proveri capture pattern
+                    if page_header[0:4] != b'OggS':
+                        break
+
+                    # Dohvati type i granice
+                    page_type = page_header[5]
+                    segments = page_header[26]
+
+                    # Čitaj segment table
+                    segment_table = f.read(segments)
+                    if len(segment_table) < segments:
+                        break
+
+                    # Izračunaj ukupnu veličinu paketa na ovoj stranici
+                    total_packet_size = sum(segment_table)
+
+                    # Čitaj podatke paketa
+                    packet_data = f.read(total_packet_size)
+                    if len(packet_data) < total_packet_size:
+                        break
+
+                    # Prvi packet u OGG fajlu je obično Vorbis header
+                    # Tražimo comment packet (tip 3)
+                    if len(packet_data) > 7 and packet_data[0:7] == b'\x03vorbis':
+                        # Ovo je comment packet
+                        # Preskoči vorbis string
+                        pos = 7
+
+                        # Vendor string length
+                        vendor_len = int.from_bytes(packet_data[pos:pos + 4], 'little')
+                        pos += 4 + vendor_len
+
+                        # Broj komentara
+                        comment_count = int.from_bytes(packet_data[pos:pos + 4], 'little')
+                        pos += 4
+
+                        # Parsiraj svaki komentar
+                        for _ in range(comment_count):
+                            if pos + 4 > len(packet_data):
+                                break
+                            comment_len = int.from_bytes(packet_data[pos:pos + 4], 'little')
+                            pos += 4
+                            if pos + comment_len > len(packet_data):
+                                break
+                            comment = packet_data[pos:pos + comment_len].decode('utf-8', errors='ignore')
+                            pos += comment_len
+
+                            if '=' in comment:
+                                key, value = comment.split('=', 1)
+                                key = key.upper()
+
+                                if key == 'ARTIST':
+                                    artist = value
+                                elif key == 'TITLE':
+                                    title = value
+                                elif key == 'ALBUM':
+                                    album = value
+
+                        # Ako smo našli comment packet, izađi
+                        if artist or title:
+                            break
+
+                    # Ako nije last page, nastavi
+                    if page_type & 0x04:  # Last page
+                        break
+
+                return {
+                    "artist": artist.strip(),
+                    "title": title.strip(),
+                    "album": album.strip()
+                }
+
+        except Exception as e:
+            print(f"[CiefpVibes] OGG parse error: {e}")
+
+        return {"artist": "", "title": "", "album": ""}
+                
     def parseArtistTitle(self, text):
         if not text:
             return "", ""
@@ -2782,22 +3435,24 @@ class CiefpVibesMain(Screen):
         self.close()
 
     # === SETTINGS ===
-    
     def openSettings(self):
         cache_size = self.getCacheSize()
-        
+        tmp_cache_size = self.get_tmp_cache_size()
+
         from Screens.ChoiceBox import ChoiceBox
         self.session.openWithCallback(
             self.settingsCategorySelected,
             ChoiceBox,
-            title=f"🔧 Settings • Cache: ({cache_size}MB)",
+            title=f"🔧 Settings • Cache: ({cache_size}MB) • TMP: ({tmp_cache_size}MB)",
             list=[
                 ("▶ Playback", "playback"),
                 ("🌐 Network", "network"),
                 ("🎨 Background", "background"),
                 ("🖼️ Poster", "poster"),
                 ("📊 Infobar", "infobar"),
-                ("🧹 Clear Cache", "clear_cache"),
+                ("🧹 Clear Image Cache", "clear_cache"),
+                ("🗑️ Clear TMP/FTP Cache", "clear_tmp_cache"),
+                ("⚙️ TMP Cache Auto-Limit", "tmp_cache_limit"),
                 ("💾 Save & Load", "save")
             ]
         )
@@ -2894,6 +3549,11 @@ class CiefpVibesMain(Screen):
                 f"🧹 Clear all cached files?\n\nCurrent cache size: {cache_size}MB",
                 MessageBox.TYPE_YESNO
             )
+
+        elif key == "clear_tmp_cache":
+            self.confirmClearTmpCache()
+        elif key == "tmp_cache_limit":
+            self.changeTmpCacheLimit()
         elif key == "save":
             self.saveConfig()
             self.saveLastPlaylist()
@@ -2906,6 +3566,47 @@ class CiefpVibesMain(Screen):
                 self.session.open(MessageBox, f"✅ Cache cleared!\n\nNew size: {new_size}MB", MessageBox.TYPE_INFO)
             else:
                 self.session.open(MessageBox, "❌ Error clearing cache!", MessageBox.TYPE_ERROR)
+
+    def confirmClearTmpCache(self):
+        tmp_size = self.get_tmp_cache_size()
+        self.session.openWithCallback(
+            self.clearTmpCacheConfirmed,
+            MessageBox,
+            f"🗑️ Clear TMP/FTP cache?\n\nCurrent size: {tmp_size} MB\n\nThis will delete all downloaded FTP files.",
+            MessageBox.TYPE_YESNO
+        )
+    def clearTmpCacheConfirmed(self, result):
+        if result:
+            success, count = self.clear_tmp_cache()
+            if success:
+                self.session.open(MessageBox, f"✅ TMP cache cleared!\n\n{count} files deleted.", MessageBox.TYPE_INFO, timeout=2)
+                # Izbrisana linija sa self["status"] - umesto toga prikaži u nowplaying
+                self["nowplaying"].setText(f"🗑️ TMP cache cleared • {count} files")
+            else:
+                self.session.open(MessageBox, "❌ Error clearing TMP cache!", MessageBox.TYPE_ERROR)
+
+    def changeTmpCacheLimit(self):
+        cache_options = [
+            ("0", "Disabled"),
+            ("100", "100 MB"),
+            ("200", "200 MB"),
+            ("500", "500 MB"),
+            ("1000", "1 GB"),
+            ("2000", "2 GB")
+        ]
+
+        self.session.openWithCallback(
+            self.tmpCacheLimitChanged,
+            ChoiceBox,
+            title="Select TMP Cache Auto-Clear Limit",
+            list=cache_options
+        )
+
+    def tmpCacheLimitChanged(self, choice):
+        if choice:
+            config.plugins.ciefpTmpCache.auto_clear.value = choice[0]
+            config.plugins.ciefpTmpCache.save()
+            self.session.open(MessageBox, f"TMP cache limit set to: {choice[0]} MB", MessageBox.TYPE_INFO, timeout=2)
 
     def playbackSettingChosen(self, choice):
         if not choice: return
