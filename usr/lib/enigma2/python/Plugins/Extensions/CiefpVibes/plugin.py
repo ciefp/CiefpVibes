@@ -40,7 +40,7 @@ config.plugins.ciefpTmpCache.auto_clear = ConfigSelection(default="500", choices
 
 PLUGIN_NAME = "CiefpVibes"
 PLUGIN_DESC = "Jukebox play music locally and online"
-PLUGIN_VERSION = "1.9"
+PLUGIN_VERSION = "2.0"
 PLUGIN_DIR = os.path.dirname(__file__) or "/usr/lib/enigma2/python/Plugins/Extensions/CiefpVibes"
 CACHE_DIR = "/tmp/ciefpvibes_cache"
 os.makedirs(CACHE_DIR, exist_ok=True)
@@ -85,6 +85,65 @@ GITHUB_RADIO_URL = "https://api.github.com/repos/ciefp/CiefpVibesFiles/contents/
 
 class CiefpVibesMain(Screen):
     def buildSkin(self):
+        return '''
+        <screen position="0,0" size="1920,1080" flags="wfNoBorder" backgroundColor="transparent">
+
+            <!-- Pozadina -->
+            <ePixmap pixmap="%s/backgrounds/background7.png" position="0,0" size="1920,1080" alphatest="blend" zPosition="-1"/>
+
+            <!-- Naslov -->
+            <widget name="title" position="50,50" size="1150,60"
+                font="Regular;42" foregroundColor="#FFFFFF"
+                transparent="1" zPosition="4" text="🌐 OpenDirectory Sources"/>
+
+            <!-- Lista izvora (SADA Listbox kao u main screenu) -->
+            <widget source="sources_list" render="Listbox"
+                position="50,120" size="1150,750"
+                transparent="1" scrollbarMode="showOnDemand" zPosition="2">
+
+                <convert type="TemplatedMultiContent">
+                    {"template": [
+                        MultiContentEntryText(
+                            pos=(20, 10),
+                            size=(1080, 50),
+                            font=0,
+                            flags=RT_HALIGN_LEFT|RT_VALIGN_CENTER,
+                            text=0
+                        )
+                    ],
+                    "fonts": [gFont("Regular", 48)],
+                    "itemHeight": 80}
+                </convert>
+            </widget>
+
+            <!-- Status -->
+            <widget name="status" position="50,890" size="1150,40"
+                font="Regular;28" foregroundColor="#00ff00"
+                transparent="1" zPosition="4"/>
+
+            <!-- Infobar -->
+            <ePixmap pixmap="%s/infobars/infobar7.png" position="0,880" size="1920,140" alphatest="blend" zPosition="1"/>
+
+            <!-- Dugmad -->
+            <widget name="key_red" position="60,950" size="260,50"
+                font="Regular;32" foregroundColor="#ff5555"
+                transparent="1" zPosition="3" text="🔴 Back"/>
+
+            <widget name="key_green" position="350,950" size="260,50"
+                font="Regular;32" foregroundColor="#55ff55"
+                transparent="1" zPosition="3" text="🟢 Add"/>
+
+            <widget name="key_yellow" position="640,950" size="300,50"
+                font="Regular;32" foregroundColor="#ffdd55"
+                transparent="1" zPosition="3" text="🟡 Edit/Delete"/>
+
+            <widget name="key_blue" position="980,950" size="300,50"
+                font="Regular;32" foregroundColor="#5599ff"
+                transparent="1" zPosition="3" text="🔵 Browse"/>
+
+        </screen>''' % (PLUGIN_PATH, PLUGIN_PATH)
+
+    def buildSkin(self):
         bg = getattr(self, "current_bg", "background1.png")
         ib = getattr(self, "current_ib", "infobar5.png")
 
@@ -121,8 +180,8 @@ class CiefpVibesMain(Screen):
 
     def __init__(self, session):
         self["poster"] = Pixmap()
-        self.current_bg = "background1.png"
-        self.current_ib = "infobar1.png"
+        self.current_bg = "background7.png"
+        self.current_ib = "infobar7.png"
         self.current_poster = "poster1.png"
         self.last_playlist_path = "/etc/enigma2/ciefpvibes_last.txt"
         self.loadConfig()
@@ -215,19 +274,18 @@ class CiefpVibesMain(Screen):
         self.last_audio_data_time = 0
         self.vibe_direction = 1
         self.vibe_value = 0
-        
         self["actions"] = ActionMap(["ColorActions", "WizardActions", "DirectionActions", "MenuActions"], {
-            "ok":       self.playSelected,
-            "back":     self.exit,
-            "up":       self.up,
-            "down":     self.down,
-            "red":      self.exit,
-            "green":    self.openFileBrowser,
-            "yellow":   self.openSettings,
-            "blue":     self.openGitHubLists,
-            "menu":     self.openNetworkMenu,
+            "ok": self.playSelected,
+            "back": self.exit,
+            "up": self.up,
+            "down": self.down,
+            "red": self.exit,
+            "green": self.openFileBrowser,
+            "yellow": self.openSettings,
+            "blue": self.openGitHubLists,
+            "menu": self.openNetworkMenu,
         }, -1)
-        
+
         self.__event_tracker = ServiceEventTracker(screen=self, eventmap={
             iPlayableService.evEOF: self.nextTrack,
             iPlayableService.evUpdatedInfo: self.updateProgress,
@@ -3707,6 +3765,24 @@ class CiefpVibesMain(Screen):
             self.close()
         else:
             self.session.open(MessageBox, f"❗ Nedostaje:\n{ib_path}", MessageBox.TYPE_ERROR)
+    # ===  OpenDirectory ===
+    def openOpenDirectory(self):
+        """Otvara OpenDirectory browser"""
+        try:
+            # Koristi apsolutnu putanju
+            import sys
+            plugin_dir = "/usr/lib/enigma2/python/Plugins/Extensions/CiefpVibes"
+            if plugin_dir not in sys.path:
+                sys.path.insert(0, plugin_dir)
+            from OpenDir import OpenDirectoryMain
+            self.session.open(OpenDirectoryMain, self)
+        except ImportError as e:
+            print(f"[CiefpVibes] Import error: {e}")
+            self.session.open(MessageBox, "OpenDirectory module not found!\nPlease install OpenDir.py",
+                              MessageBox.TYPE_ERROR)
+        except Exception as e:
+            print(f"[CiefpVibes] OpenDir error: {e}")
+            self.session.open(MessageBox, f"OpenDirectory error:\n{str(e)[:80]}", MessageBox.TYPE_ERROR)
 
     # === ONLINE FILES ===
     
@@ -3720,6 +3796,7 @@ class CiefpVibesMain(Screen):
                 ("🎶 M3U MIX Playlists", "M3U MIX"),
                 ("📺 .tv Bouquets", "TV"),
                 ("📻 Radio Lists", "RADIO"),
+                ("🌐 OpenDirectory Browser", "OPENDIR"),  # <-- DODAJ OVO
             ]
         )
 
@@ -3735,6 +3812,9 @@ class CiefpVibesMain(Screen):
             url = GITHUB_TV_URL
         elif cat == "RADIO":
             url = GITHUB_RADIO_URL
+        elif cat == "OPENDIR":  # <-- DODAJ OVO
+            self.openOpenDirectory()  # <-- POZIV ZA OPENDIR
+            return
         else:
             return
 
