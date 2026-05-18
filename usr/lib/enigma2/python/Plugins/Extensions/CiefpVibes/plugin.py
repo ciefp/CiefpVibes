@@ -33,14 +33,14 @@ config.plugins.ciefpTmpCache.auto_clear = ConfigSelection(default="500", choices
     ("0", "Disabled"),
     ("100", "100 MB"),
     ("200", "200 MB"),
+    ("300", "300 MB"),
     ("500", "500 MB"),
-    ("1000", "1 GB"),
-    ("2000", "2 GB")
+    ("1000", "1 GB")
 ])
 
 PLUGIN_NAME = "CiefpVibes"
 PLUGIN_DESC = "Jukebox play music locally and online"
-PLUGIN_VERSION = "2.0"
+PLUGIN_VERSION = "2.1"
 PLUGIN_DIR = os.path.dirname(__file__) or "/usr/lib/enigma2/python/Plugins/Extensions/CiefpVibes"
 CACHE_DIR = "/tmp/ciefpvibes_cache"
 os.makedirs(CACHE_DIR, exist_ok=True)
@@ -85,65 +85,6 @@ GITHUB_RADIO_URL = "https://api.github.com/repos/ciefp/CiefpVibesFiles/contents/
 
 class CiefpVibesMain(Screen):
     def buildSkin(self):
-        return '''
-        <screen position="0,0" size="1920,1080" flags="wfNoBorder" backgroundColor="transparent">
-
-            <!-- Pozadina -->
-            <ePixmap pixmap="%s/backgrounds/background7.png" position="0,0" size="1920,1080" alphatest="blend" zPosition="-1"/>
-
-            <!-- Naslov -->
-            <widget name="title" position="50,50" size="1150,60"
-                font="Regular;42" foregroundColor="#FFFFFF"
-                transparent="1" zPosition="4" text="🌐 OpenDirectory Sources"/>
-
-            <!-- Lista izvora (SADA Listbox kao u main screenu) -->
-            <widget source="sources_list" render="Listbox"
-                position="50,120" size="1150,750"
-                transparent="1" scrollbarMode="showOnDemand" zPosition="2">
-
-                <convert type="TemplatedMultiContent">
-                    {"template": [
-                        MultiContentEntryText(
-                            pos=(20, 10),
-                            size=(1080, 50),
-                            font=0,
-                            flags=RT_HALIGN_LEFT|RT_VALIGN_CENTER,
-                            text=0
-                        )
-                    ],
-                    "fonts": [gFont("Regular", 48)],
-                    "itemHeight": 80}
-                </convert>
-            </widget>
-
-            <!-- Status -->
-            <widget name="status" position="50,890" size="1150,40"
-                font="Regular;28" foregroundColor="#00ff00"
-                transparent="1" zPosition="4"/>
-
-            <!-- Infobar -->
-            <ePixmap pixmap="%s/infobars/infobar7.png" position="0,880" size="1920,140" alphatest="blend" zPosition="1"/>
-
-            <!-- Dugmad -->
-            <widget name="key_red" position="60,950" size="260,50"
-                font="Regular;32" foregroundColor="#ff5555"
-                transparent="1" zPosition="3" text="🔴 Back"/>
-
-            <widget name="key_green" position="350,950" size="260,50"
-                font="Regular;32" foregroundColor="#55ff55"
-                transparent="1" zPosition="3" text="🟢 Add"/>
-
-            <widget name="key_yellow" position="640,950" size="300,50"
-                font="Regular;32" foregroundColor="#ffdd55"
-                transparent="1" zPosition="3" text="🟡 Edit/Delete"/>
-
-            <widget name="key_blue" position="980,950" size="300,50"
-                font="Regular;32" foregroundColor="#5599ff"
-                transparent="1" zPosition="3" text="🔵 Browse"/>
-
-        </screen>''' % (PLUGIN_PATH, PLUGIN_PATH)
-
-    def buildSkin(self):
         bg = getattr(self, "current_bg", "background1.png")
         ib = getattr(self, "current_ib", "infobar5.png")
 
@@ -173,7 +114,8 @@ class CiefpVibesMain(Screen):
             <widget name="key_red"    position="60,1030"  size="260,50" font="Regular;32" foregroundColor="#ff5555" transparent="1" zPosition="3"/>
             <widget name="key_green"  position="350,1030" size="260,50" font="Regular;32" foregroundColor="#55ff55" transparent="1" zPosition="3"/>
             <widget name="key_yellow" position="640,1030" size="300,50" font="Regular;32" foregroundColor="#ffdd55" transparent="1" zPosition="3"/>
-            <widget name="key_blue"   position="980,1030" size="260,50" font="Regular;32" foregroundColor="#5599ff" transparent="1" zPosition="3"/>
+            <widget name="key_blue"   position="930,1030" size="260,50" font="Regular;32" foregroundColor="#5599ff" transparent="1" zPosition="3"/>
+            <widget name="key_menu"   position="1200,1030" size="300,50" font="Regular;32" foregroundColor="#ffffff" transparent="1" zPosition="3"/>
             <!-- DODAJTE OVAJ WIDGET ZA UPDATE STATUS -->
             <widget name="update_status" position="1250,1030" size="400,40" font="Regular;28" foregroundColor="#ffffff" halign="right" transparent="1" zPosition="3"/>
         </screen>''' % (PLUGIN_DIR, bg, PLUGIN_DIR, ib, PLUGIN_DIR)
@@ -182,7 +124,7 @@ class CiefpVibesMain(Screen):
         self["poster"] = Pixmap()
         self.current_bg = "background7.png"
         self.current_ib = "infobar7.png"
-        self.current_poster = "poster1.png"
+        self.current_poster = "poster5.png"
         self.last_playlist_path = "/etc/enigma2/ciefpvibes_last.txt"
         self.loadConfig()
 
@@ -244,10 +186,11 @@ class CiefpVibesMain(Screen):
         self["playlist"] = List([])
         self["nowplaying"] = Label("🌀 Loading...")
         self["source_label"] = Label("")
-        self["key_red"] = Label("🔴 EXIT")
-        self["key_green"] = Label("🟢 FOLDER")
-        self["key_yellow"] = Label("🟡 SETTINGS")
-        self["key_blue"] = Label("🔵 Online Files")
+        self["key_red"] = Label("EXIT")
+        self["key_green"] = Label("FOLDER")
+        self["key_yellow"] = Label("SETTINGS")
+        self["key_blue"] = Label("Online Files")
+        self["key_menu"] = Label("Menu:Network")
 
         # Dodajte ovo u __init__ metodi, negde posle ostalih widget definicija:
         self["update_status"] = Label("")

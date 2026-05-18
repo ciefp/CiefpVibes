@@ -193,22 +193,28 @@ class OpenDirectoryMain(Screen):
 
                     if '|' in line:
                         name, url = line.split("|", 1)
-                        name = urllib.parse.unquote(name.strip())  # DEKODIRAJ SAMO ZA PRIKAZ
+                        name = urllib.parse.unquote(name.strip())
                         self.sources.append((name, url.strip()))
                     elif line.startswith(('http://', 'https://')):
                         url = line
-                        # DEKODIRAJ SAMO ZA PRIKAZ (URL ostaje originalan)
                         name = url.rstrip('/').split('/')[-1]
                         name = urllib.parse.unquote(name)
                         if not name:
                             name = url.replace('http://', '').replace('https://', '').split('/')[0]
-                        self.sources.append((name, url))  # url ostaje originalan!
+                        self.sources.append((name, url))
         except Exception as e:
             print(f"[OpenDir] Load error: {e}")
 
-        display_list = [f"📁 {name}" for name, url in self.sources]
+        # === POPRAVKA ZA OPENPLi ===
+        # Umjesto običnih stringova, pravimo tuple-ove (dovoljno je da prvi element bude tekst)
+        display_list = []
+        for name, url in self.sources:
+            # Svaki element MORA biti tuple - OpenPLi zahtijeva
+            display_list.append((f"📁 {name}", name))  # (prikaz, podatak)
+
         if not display_list:
-            display_list = ["[No sources. Press GREEN to add]"]
+            display_list = [("[No sources. Press GREEN to add]", "empty")]
+
         self["sources_list"].setList(display_list)
 
     def update_status(self):
@@ -443,21 +449,20 @@ class OpenDirectoryContent(Screen):
         
         items.sort(key=lambda x: (x[2] != 'folder', x[0].lower()))
         self.content_items = items
-        
+
         display_list = []
         for name, url, typ in items:
             if typ == 'folder':
-                display_list.append(f"📁 {name}")
+                display_list.append((f"📁 {name}", name, url, typ))  # ← TUPLE
             else:
-                # Označi selektovane fajlove
                 if (name, url) in self.selected_files:
-                    display_list.append(f"✅ {name}")
+                    display_list.append((f"✅ {name}", name, url, typ))  # ← TUPLE
                 else:
-                    display_list.append(f"🎵 {name}")
-        
+                    display_list.append((f"🎵 {name}", name, url, typ))  # ← TUPLE
+
         if not display_list:
             display_list = ["[Empty directory]"]
-        
+
         self["content_list"].setList(display_list)
         self["path_label"].setText(f"📂 {self.source_name}: {self.current_url}")
         self.update_selected_list()
@@ -567,24 +572,24 @@ class OpenDirectoryContent(Screen):
             # Osvježi prikaz
             self.update_selected_list()
             self.refresh_content_list()
-    
+
     def refresh_content_list(self):
         """Osvježava prikaz liste (da ažurira ✅ oznake)"""
         if not self.content_items:
             return
-        
+
         display_list = []
         for name, url, typ in self.content_items:
             if typ == 'folder':
-                display_list.append(f"📁 {name}")
+                display_list.append((f"📁 {name}", name, url, typ))
             else:
                 if (name, url) in self.selected_files:
-                    display_list.append(f"✅ {name}")
+                    display_list.append((f"✅ {name}", name, url, typ))
                 else:
-                    display_list.append(f"🎵 {name}")
-        
+                    display_list.append((f"🎵 {name}", name, url, typ))
+
         self["content_list"].setList(display_list)
-    
+
     def update_selected_list(self):
         """Ažurira prikaz selektovanih fajlova"""
         if not self.selected_files:
