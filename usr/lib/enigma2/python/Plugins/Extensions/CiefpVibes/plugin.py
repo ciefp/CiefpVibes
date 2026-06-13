@@ -26,6 +26,13 @@ from enigma import eServiceReference, eTimer, iPlayableService, gFont, iServiceI
 from Plugins.Plugin import PluginDescriptor
 from urllib.parse import unquote
 from Components.config import config, ConfigSelection, ConfigSubsection
+# OpenDirectory Downloader
+try:
+    from .opendirdownloader import OpenDirDownloaderScreen
+    OPENDIR_DOWNLOADER_AVAILABLE = True
+except ImportError:
+    OPENDIR_DOWNLOADER_AVAILABLE = False
+    print("[CiefpVibes] OpenDirDownloader not available")
 
 # TMP cache config
 config.plugins.ciefpTmpCache = ConfigSubsection()
@@ -40,7 +47,7 @@ config.plugins.ciefpTmpCache.auto_clear = ConfigSelection(default="500", choices
 
 PLUGIN_NAME = "CiefpVibes"
 PLUGIN_DESC = "Jukebox play music locally and online"
-PLUGIN_VERSION = "2.1"
+PLUGIN_VERSION = "2.2"
 PLUGIN_DIR = os.path.dirname(__file__) or "/usr/lib/enigma2/python/Plugins/Extensions/CiefpVibes"
 CACHE_DIR = "/tmp/ciefpvibes_cache"
 os.makedirs(CACHE_DIR, exist_ok=True)
@@ -3727,9 +3734,31 @@ class CiefpVibesMain(Screen):
             print(f"[CiefpVibes] OpenDir error: {e}")
             self.session.open(MessageBox, f"OpenDirectory error:\n{str(e)[:80]}", MessageBox.TYPE_ERROR)
 
+    def openOpenDirDownloader(self):
+        """Otvara OpenDirectory Downloader"""
+        if not OPENDIR_DOWNLOADER_AVAILABLE:
+            self.session.open(MessageBox,
+                              "OpenDirectory Downloader module not found!\n"
+                              "Please install opendirdownloader.py in plugin folder.",
+                              MessageBox.TYPE_ERROR)
+            return
+
+        try:
+            # Uvezi samo kada je potrebno da izbjegnemo circular import
+            from .opendirdownloader import OpenDirDownloaderScreen
+            self.session.open(OpenDirDownloaderScreen)
+        except Exception as e:
+            print(f"[CiefpVibes] Error opening OpenDirDownloader: {e}")
+            self.session.open(MessageBox,
+                              f"Error opening OpenDirectory Downloader:\n{str(e)[:100]}",
+                              MessageBox.TYPE_ERROR)
+
     # === ONLINE FILES ===
-    
     def openGitHubLists(self):
+        # Provjera da li je OpenDirectory Downloader dostupan
+        opendir_label = "📥 OpenDirectory Downloader" if OPENDIR_DOWNLOADER_AVAILABLE else "📥 OpenDirectory (not available)"
+        opendir_value = "OPENDIR_DOWNLOADER" if OPENDIR_DOWNLOADER_AVAILABLE else "OPENDIR_UNAVAILABLE"
+
         self.session.openWithCallback(
             self.githubCategorySelected,
             ChoiceBox,
@@ -3739,7 +3768,8 @@ class CiefpVibesMain(Screen):
                 ("🎶 M3U MIX Playlists", "M3U MIX"),
                 ("📺 .tv Bouquets", "TV"),
                 ("📻 Radio Lists", "RADIO"),
-                ("🌐 OpenDirectory Browser", "OPENDIR"),  # <-- DODAJ OVO
+                ("🌐 OpenDirectory Browser", "OPENDIR"),
+                (opendir_label, opendir_value),
             ]
         )
 
@@ -3747,6 +3777,14 @@ class CiefpVibesMain(Screen):
         if not choice:
             return
         cat = choice[1]
+
+        if cat == "OPENDIR_UNAVAILABLE":
+            self.session.open(MessageBox,
+                              "OpenDirectory Downloader module not found!\n"
+                              "Please install opendirdownloader.py in plugin folder.",
+                              MessageBox.TYPE_ERROR)
+            return
+
         if cat == "M3U ARTIST":
             url = GITHUB_M3U_ARTIST_URL
         elif cat == "M3U MIX":
@@ -3755,8 +3793,11 @@ class CiefpVibesMain(Screen):
             url = GITHUB_TV_URL
         elif cat == "RADIO":
             url = GITHUB_RADIO_URL
-        elif cat == "OPENDIR":  # <-- DODAJ OVO
-            self.openOpenDirectory()  # <-- POZIV ZA OPENDIR
+        elif cat == "OPENDIR":
+            self.openOpenDirectory()
+            return
+        elif cat == "OPENDIR_DOWNLOADER":
+            self.openOpenDirDownloader()
             return
         else:
             return
@@ -3765,14 +3806,14 @@ class CiefpVibesMain(Screen):
         if not items:
             self.session.open(MessageBox, f"No lists in {cat} category.", MessageBox.TYPE_INFO)
             return
-        
+
         self.session.openWithCallback(
             self.githubListSelected,
             ChoiceBox,
             title=f"📥 Choose {cat} list",
             list=[(display, (dl_url, filename)) for display, dl_url, filename in items]
         )
-    
+
     def fetchGitHubLists(self, url, category):
         try:
             req = urllib.request.Request(url)
