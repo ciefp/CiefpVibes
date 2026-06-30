@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+
 from __future__ import print_function
 import os
 import json 
@@ -22,7 +23,7 @@ from Screens.ChoiceBox import ChoiceBox
 from Screens.MessageBox import MessageBox
 from Screens.VirtualKeyBoard import VirtualKeyBoard
 from Tools.Directories import fileExists
-from enigma import eServiceReference, eTimer, iPlayableService, gFont, iServiceInformation, RT_HALIGN_LEFT, RT_VALIGN_CENTER, eConsoleAppContainer
+from enigma import eServiceReference, eTimer, iPlayableService, gFont, iServiceInformation, RT_HALIGN_LEFT, RT_VALIGN_CENTER, eConsoleAppContainer, eEPGCache
 from Plugins.Plugin import PluginDescriptor
 from urllib.parse import unquote
 from Components.config import config, ConfigSelection, ConfigSubsection
@@ -33,7 +34,327 @@ try:
 except ImportError:
     OPENDIR_DOWNLOADER_AVAILABLE = False
     print("[CiefpVibes] OpenDirDownloader not available")
+# Satellite Radio Lamedb Modul
+try:
+    from .CiefpSatelliteRadio import CiefpSatelliteRadioScreen
+    SAT_RADIO_AVAILABLE = True
+    print("[CiefpVibes] CiefpSatelliteRadio loaded successfully!")
+except ImportError as e:
+    SAT_RADIO_AVAILABLE = False
+    print(f"[CiefpVibes] CiefpSatelliteRadio import error: {e}")
+# Na vrhu fajla, posle import-ova:
+try:
+    from enigma import iServiceInformation
+    # Proveri da li konstante postoje
+    if not hasattr(iServiceInformation, 'sRdsRadioText'):
+        # Definiši ih (brojevi su standardni za Enigma2)
+        iServiceInformation.sRdsRadioText = 23
+        iServiceInformation.sRdsProgramService = 24
+        iServiceInformation.sRdsRadioTextPlus = 25
+        iServiceInformation.sRdsProgramType = 26
+        iServiceInformation.sRdsProgramIdentification = 27
+        print("[CiefpVibes] RDS constants defined manually")
+except Exception as e:
+    print(f"[CiefpVibes] RDS constants error: {e}")
 
+# DEBUG RDS CONSTANTS
+try:
+    from enigma import iServiceInformation
+    print(f"[CiefpVibes] RDS constants: sRdsRadioText={iServiceInformation.sRdsRadioText}, sRdsProgramService={iServiceInformation.sRdsProgramService}")
+except:
+    pass
+
+def is_satellite_radio_service(service_ref):
+    """
+    Proverava da li je service_ref satelitski radio.
+    Podržava samo RADIO tipove:
+    - 1:0:2:... (Radio)
+    - 1:0:A:... (Tip 10 - Radio sa extended codec)
+    NE uključuje tip 1 (TV)
+    """
+    if not service_ref:
+        return False
+
+    if isinstance(service_ref, str):
+        parts = service_ref.split(':')
+        if len(parts) >= 4:
+            # Proveri prva 3 polja: 1:0:2 ili 1:0:A
+            if parts[0] == '1' and parts[1] == '0':
+                service_type = parts[2].upper()
+                # SAMO radio tipovi: 2 ili A (10)
+                if service_type == '2' or service_type == 'A' or service_type == '10':
+                    return True
+    return False
+
+def create_dvb_service_reference(service_ref):
+    """Kreira eServiceReference za DVB service (satelitski radio)"""
+    # Format: 1:0:2:SID:TID:NID:Namespace:0:0:0:
+    # Enigma2 očekuje: 1:0:2:XXXX:XXXX:XXXX:XXXXXXXX:0:0:0:
+    return eServiceReference(service_ref)
+# === EPG FUNKCIJE ===
+def get_current_service():
+    """Vraća trenutni servis (ref) koji se gleda"""
+    try:
+        from Screens.InfoBar import InfoBar
+        if InfoBar.instance:
+            playing_service = InfoBar.instance.session.nav.getCurrentlyPlayingServiceReference()
+            if playing_service:
+                return playing_service
+    except Exception as e:
+        print(f"[CiefpVibes] get_current_service error: {e}")
+    return None
+
+def get_current_epg_event():
+    """Vraća trenutni EPG event kao dict"""
+    service = get_current_service()
+    if not service:
+        return None
+
+    try:
+        epg = eEPGCache.getInstance()
+        event = epg.lookupEventTime(service, -1, 0)  # current event
+        if not event:
+            return None
+
+        # tuple format: (begin, duration, title, short, ext, ...)
+        if isinstance(event, tuple) and len(event) >= 5:
+            return {
+                'name': str(event[2]) if len(event) > 2 else '',
+                'short': str(event[3]) if len(event) > 3 else '',
+                'ext': str(event[4]) if len(event) > 4 else '',
+                'begin': int(event[0]) if len(event) > 0 and event[0] is not None else None,
+                'duration': int(event[1]) if len(event) > 1 and event[1] is not None else None,
+            }
+        elif hasattr(event, 'getEventName'):
+            return {
+                'name': event.getEventName() or '',
+                'short': event.getShortDescription() or '',
+                'ext': event.getExtendedDescription() or '',
+                'begin': event.getBeginTime() if hasattr(event, 'getBeginTime') else None,
+                'duration': event.getDuration() if hasattr(event, 'getDuration') else None,
+            }
+    except Exception as e:
+        print(f"[CiefpVibes] EPG lookup error: {e}")
+    return None
+
+def get_next_epg_events(max_items=5):
+    """Vraća listu narednih EPG eventova"""
+    service = get_current_service()
+    if not service:
+        return []
+
+    epg = eEPGCache.getInstance()
+    out = []
+
+    try:
+        # Trenutni event
+        cur = epg.lookupEventTime(service, -1, 0)
+        if not cur:
+            return out
+
+        cur_d = None
+        if isinstance(cur, tuple) and len(cur) >= 5:
+            cur_d = {
+                'name': str(cur[2]),
+                'begin': int(cur[0]) if cur[0] else None,
+                'duration': int(cur[1]) if cur[1] else None,
+            }
+        elif hasattr(cur, 'getEventName'):
+            cur_d = {
+                'name': cur.getEventName() or '',
+                'begin': cur.getBeginTime() if hasattr(cur, 'getBeginTime') else None,
+                'duration': cur.getDuration() if hasattr(cur, 'getDuration') else None,
+            }
+
+        if not cur_d or not cur_d.get('name'):
+            return out
+
+        out.append(cur_d)
+
+        # Naredni eventovi
+        t = cur_d.get('begin')
+        dur = cur_d.get('duration')
+        if not t or not dur:
+            return out
+
+        next_time = int(t) + int(dur) + 1
+
+        for _ in range(max_items - 1):
+            ev = epg.lookupEventTime(service, next_time, 0)
+            if not ev:
+                break
+
+            ev_d = None
+            if isinstance(ev, tuple) and len(ev) >= 5:
+                ev_d = {
+                    'name': str(ev[2]),
+                    'begin': int(ev[0]) if ev[0] else None,
+                    'duration': int(ev[1]) if ev[1] else None,
+                }
+            elif hasattr(ev, 'getEventName'):
+                ev_d = {
+                    'name': ev.getEventName() or '',
+                    'begin': ev.getBeginTime() if hasattr(ev, 'getBeginTime') else None,
+                    'duration': ev.getDuration() if hasattr(ev, 'getDuration') else None,
+                }
+
+            if not ev_d or not ev_d.get('name'):
+                break
+
+            out.append(ev_d)
+
+            b = ev_d.get('begin')
+            d = ev_d.get('duration')
+            if not b or not d:
+                break
+            next_time = int(b) + int(d) + 1
+
+    except Exception as e:
+        print(f"[CiefpVibes] get_next_epg_events error: {e}")
+
+    return out
+
+
+# === RDS FUNKCIJE ===
+def get_current_rds_text():
+    """
+    Dohvata RDS RadioText sa trenutnog servisa
+    """
+    try:
+        from Screens.InfoBar import InfoBar
+        if not InfoBar.instance:
+            return None
+
+        service = InfoBar.instance.session.nav.getCurrentService()
+        if not service:
+            return None
+
+        info = service.info()
+        if not info:
+            return None
+
+        # Probaj sve RDS varijante
+        rds_text = info.getInfoString(iServiceInformation.sRdsRadioText)
+        if rds_text and rds_text.strip():
+            return rds_text.strip()
+
+        # Ako nema RadioText, probaj Program Service
+        rds_ps = info.getInfoString(iServiceInformation.sRdsProgramService)
+        if rds_ps and rds_ps.strip():
+            return rds_ps.strip()
+
+        # Probaj RadioText Plus
+        rds_plus = info.getInfoString(iServiceInformation.sRdsRadioTextPlus)
+        if rds_plus and rds_plus.strip():
+            return rds_plus.strip()
+
+    except Exception as e:
+        print(f"[CiefpVibes] RDS error: {e}")
+
+    return None
+def get_current_rds_info():
+    """
+    Dohvata sve RDS informacije sa trenutnog servisa
+    """
+    try:
+        service_handler = None
+        from Screens.InfoBar import InfoBar
+        if InfoBar.instance:
+            service_handler = InfoBar.instance.session.nav.getCurrentService()
+
+        if not service_handler:
+            return None
+
+        info = service_handler.info()
+        if not info:
+            return None
+
+        rds_data = {
+            'text': info.getInfoString(iServiceInformation.sRdsRadioText) or '',
+            'ps': info.getInfoString(iServiceInformation.sRdsProgramService) or '',
+            'plus': info.getInfoString(iServiceInformation.sRdsRadioTextPlus) or '',
+            'pty': info.getInfoString(iServiceInformation.sRdsProgramType) or '',
+            'pi': info.getInfoString(iServiceInformation.sRdsProgramIdentification) or '',
+        }
+
+        return rds_data
+    except Exception as e:
+        print(f"[CiefpVibes] RDS info error: {e}")
+        return None
+
+def get_rds_from_enigma2():
+    """
+    Dohvata RDS direktno iz Enigma2 RDS dekodera
+    Koristi eDVBServicePlay RDS podatke
+    """
+    try:
+        from Screens.InfoBar import InfoBar
+        if not InfoBar.instance:
+            return None
+
+        service = InfoBar.instance.session.nav.getCurrentService()
+        if not service:
+            return None
+
+        # Pokušaj preko RDS dekodera
+        try:
+            # Ovo je direktan pristup RDS podacima
+            if hasattr(service, 'getRDS'):
+                rds_data = service.getRDS()
+                if rds_data:
+                    # RDS data može biti tuple ili string
+                    if isinstance(rds_data, tuple):
+                        # (radiotext, program_service, ...)
+                        if len(rds_data) > 0 and rds_data[0]:
+                            return str(rds_data[0]).strip()
+                    elif isinstance(rds_data, str):
+                        return rds_data.strip()
+        except:
+            pass
+
+        # Pokušaj preko info sa različitim indeksima
+        info = service.info()
+        if info:
+            # Standardni RDS indeksi za Enigma2
+            rds_indices = {
+                23: 'sRdsRadioText',
+                24: 'sRdsProgramService',
+                25: 'sRdsRadioTextPlus',
+                26: 'sRdsProgramType',
+                27: 'sRdsProgramIdentification',
+                28: 'sRdsRadioText2',  # Neke verzije
+                29: 'sRdsProgramService2',  # Neke verzije
+            }
+
+            for idx, name in rds_indices.items():
+                try:
+                    val = info.getInfoString(idx)
+                    if val and val.strip():
+                        print(f"[CiefpVibes] RDS via idx {idx} ({name}): {val}")
+                        return val.strip()
+                except:
+                    pass
+
+        # Pokušaj preko event-a (ako je RDS u EPG-u)
+        try:
+            from enigma import eEPGCache
+            ref = InfoBar.instance.session.nav.getCurrentlyPlayingServiceReference()
+            if ref:
+                epg = eEPGCache.getInstance()
+                event = epg.lookupEventTime(ref, -1, 0)
+                if event:
+                    # Neki RDS podaci mogu biti u EPG-u
+                    if hasattr(event, 'getRds'):
+                        rds = event.getRds()
+                        if rds:
+                            return str(rds).strip()
+        except:
+            pass
+
+    except Exception as e:
+        print(f"[CiefpVibes] get_rds_from_enigma2 error: {e}")
+
+    return None
 # TMP cache config
 config.plugins.ciefpTmpCache = ConfigSubsection()
 config.plugins.ciefpTmpCache.auto_clear = ConfigSelection(default="500", choices=[
@@ -47,7 +368,7 @@ config.plugins.ciefpTmpCache.auto_clear = ConfigSelection(default="500", choices
 
 PLUGIN_NAME = "CiefpVibes"
 PLUGIN_DESC = "Jukebox play music locally and online"
-PLUGIN_VERSION = "2.2"
+PLUGIN_VERSION = "2.3"
 PLUGIN_DIR = os.path.dirname(__file__) or "/usr/lib/enigma2/python/Plugins/Extensions/CiefpVibes"
 CACHE_DIR = "/tmp/ciefpvibes_cache"
 os.makedirs(CACHE_DIR, exist_ok=True)
@@ -162,6 +483,8 @@ class CiefpVibesMain(Screen):
 
         self.is_current_stream_online = False  # Već postoji, samo potvrda
         self.last_displayed_title = ""  # Za praćenje promene na infobaru
+        self.last_displayed_desc = ""
+        self.last_rds_text = ""  # <-- DODAJ OVO
         self.poster_search_delay = 10  # sekundi za online radio
         self.last_title_change_time = 0  # Kada je poslednji put promenjen naslov
         self.auto_title_update_timer = eTimer()
@@ -173,6 +496,11 @@ class CiefpVibesMain(Screen):
         # Timer za zaključavanje postera
         self.lock_timer = eTimer()
         self.lock_timer.callback.append(self.lockCurrentPoster)
+
+        # Timer za EPG refresh (svake 3 sekunde)
+        self.epg_timer = eTimer()
+        self.epg_timer.callback.append(self.updateEPG)
+        self.epg_timer.start(2000, False)  # 2 sekunde
 
         #FTP konekcija
         self.ftp_ip = "192.168.1."
@@ -190,6 +518,7 @@ class CiefpVibesMain(Screen):
         self.repeat_mode = "off"
         self.shuffle_enabled = False
         self.network_timeout = 30
+        self.is_dvb_radio = False
         self["playlist"] = List([])
         self["nowplaying"] = Label("🌀 Loading...")
         self["source_label"] = Label("")
@@ -500,6 +829,81 @@ class CiefpVibesMain(Screen):
         else:
             self["update_status"].setText("")
             self["update_status"].hide()
+
+    def updateEPG(self):
+        """Poseban timer za EPG i RDS osvežavanje"""
+        if not hasattr(self, 'is_dvb_radio') or not self.is_dvb_radio:
+            return
+
+        try:
+            # Dohvati EPG
+            epg_title = ""
+            epg_event = get_current_epg_event()
+            if epg_event and epg_event.get('name'):
+                epg_title = epg_event['name']
+
+            # Dohvati RDS preko rdsDecoder
+            rds_text = ""
+            try:
+                from Screens.InfoBar import InfoBar
+                if InfoBar.instance:
+                    service = InfoBar.instance.session.nav.getCurrentService()
+                    if service and hasattr(service, "rdsDecoder"):
+                        decoder = service.rdsDecoder()
+                        if decoder:
+                            try:
+                                txt = decoder.getText()
+                                if txt:
+                                    rds_text = txt.strip()
+                                    if rds_text != self.last_rds_text:
+                                        self.last_rds_text = rds_text
+                                        print(f"[CiefpVibes] NEW RDS: {rds_text}")
+                            except Exception as e:
+                                print(f"[CiefpVibes] getText error: {e}")
+            except Exception as e:
+                print(f"[CiefpVibes] RDS decoder error: {e}")
+
+            # Formiraj prikaz
+            if self.playlist and 0 <= self.currentIndex < len(self.playlist):
+                name = self.playlist[self.currentIndex][0]
+                display = f"📻 {name}"
+
+                if epg_title:
+                    display += f" • {epg_title}"
+
+                if rds_text:
+                    if len(rds_text) > 35:
+                        rds_short = rds_text[:32] + "..."
+                    else:
+                        rds_short = rds_text
+                    display += f" • {rds_short}"
+
+                self["nowplaying"].setText(display)
+                print(f"[CiefpVibes] Prikaz: {display}")
+
+        except Exception as e:
+            print(f"[CiefpVibes] EPG/RDS timer error: {e}")
+
+            # Formiraj prikaz
+            if self.playlist and 0 <= self.currentIndex < len(self.playlist):
+                name = self.playlist[self.currentIndex][0]
+                display = f"📻 {name}"
+
+                if epg_title:
+                    display += f" • {epg_title}"
+
+                if rds_text:
+                    if len(rds_text) > 50:
+                        rds_short = rds_text[:48] + "..."
+                    else:
+                        rds_short = rds_text
+                    display += f" • {rds_short}"
+
+                self["nowplaying"].setText(display)
+                print(f"[CiefpVibes] Prikaz: {display}")
+
+        except Exception as e:
+            print(f"[CiefpVibes] EPG/RDS timer error: {e}")
 
 # ==== TMP cache manage ===
     def get_tmp_cache_size(self):
@@ -1246,8 +1650,8 @@ class CiefpVibesMain(Screen):
     
     def scannedDeviceSelected(self, choice):
         if choice:
-            self.laptopIPEntered(choice[1])
-
+            self.lapt
+            
     # === FILE BROWSER METODE ===
     def openFileBrowser(self):
         """Otvori file browser - originalna radna verzija"""
@@ -1264,10 +1668,11 @@ class CiefpVibesMain(Screen):
                 ("💾 Local Storage", "local"),
                 ("💻 Network (Laptop)", "network"),
                 ("📡 Online Streams", "online"),
+                ("📻 Satellite Radio (lamedb)", "sat_radio"),
                 (f"🗑️ TMP/FTP Files ({tmp_files_count} files)", "tmp"),
             ]
         )
-        
+
     def count_tmp_audio_files(self):
         """Broji audio fajlove u /tmp/ciefpvibes_ftp_cache i /tmp"""
         count = 0
@@ -1289,6 +1694,29 @@ class CiefpVibesMain(Screen):
 
     def browserTypeSelected(self, choice):
         if not choice:
+            return
+
+        if choice[1] == "sat_radio":
+            # DEBUG: Prikaži šta se dešava
+            print(f"[CiefpVibes] SAT_RADIO_AVAILABLE = {SAT_RADIO_AVAILABLE}")
+            print(f"[CiefpVibes] Plugin dir = {PLUGIN_DIR}")
+            try:
+                import os
+                print(f"[CiefpVibes] Files in plugin dir: {os.listdir(PLUGIN_DIR)}")
+            except:
+                pass
+
+            if not SAT_RADIO_AVAILABLE:
+                self.session.open(
+                    MessageBox,
+                    "❌ Satellite Radio module not available!\n\n"
+                    "Please check that CiefpSatelliteRadio.py\n"
+                    "is in the plugin folder.",
+                    MessageBox.TYPE_ERROR
+                )
+                return
+            # Otvaramo satelitski modul
+            self.session.openWithCallback(self.satelliteRadioClosed, CiefpSatelliteRadioScreen)
             return
 
         if choice[1] == "local":
@@ -1382,6 +1810,71 @@ class CiefpVibesMain(Screen):
 
         if path:
             self.loadPlaylistFromFile(path, name)
+
+    def satelliteRadioClosed(self, result):
+        if result:
+            # result je lista u formatu: [("Ime Stanice", "1:0:2:..."), ...]
+
+            # === DODAJ EPG UZ LISTU ===
+            playlist_with_epg = []
+
+            for station_name, service_ref in result:
+                # Pokušaj dohvatiti EPG za ovu stanicu
+                epg_text = ""
+                try:
+                    # Kreiraj eServiceReference za EPG lookup
+                    ref = eServiceReference(service_ref)
+                    if ref:
+                        epg = eEPGCache.getInstance()
+                        event = epg.lookupEventTime(ref, -1, 0)  # Trenutni event
+                        if event:
+                            if isinstance(event, tuple) and len(event) >= 5:
+                                epg_text = str(event[2]) if len(event) > 2 else ""
+                            elif hasattr(event, 'getEventName'):
+                                epg_text = event.getEventName() or ""
+
+                            # Skrati EPG ako je predugačak (30 karaktera)
+                            if len(epg_text) > 30:
+                                epg_text = epg_text[:27] + "..."
+                except Exception as e:
+                    print(f"[CiefpVibes] EPG lookup error for {station_name}: {e}")
+
+                # Formiraj naziv za prikaz - EPG u istoj liniji
+                if epg_text:
+                    display_name = f"{station_name} • {epg_text}"
+                else:
+                    display_name = station_name
+
+                playlist_with_epg.append((display_name, service_ref))
+
+            # Postavi playlistu sa EPG-om
+            self.playlist = playlist_with_epg
+            self["playlist"].setList(self.playlist)
+            self["playlist"].index = 0
+            self.currentIndex = 0
+
+            # Resetuj DVB radio flag
+            self.is_dvb_radio = False
+            self.last_rds_text = ""
+
+            # === RESETUJ PRIKAZ ===
+            self.setSourceLabel("", f"📡 Satellite Radio ({len(self.playlist)} stations)")
+
+            if self.playlist:
+                # Prikaži prvu stanicu sa EPG-om
+                self["nowplaying"].setText(f"📻 {self.playlist[0][0]}")
+            else:
+                self["nowplaying"].setText("📻 Satellite Radio - select a station")
+
+            # === RESETUJ POSTER ===
+            self.current_poster_path = ""
+            self.poster_locked = False
+            self.poster_change_count = 0
+            self.showDefaultPoster()
+
+            self.is_current_stream_online = True
+
+            print(f"[CiefpVibes] Satellite radio loaded: {len(self.playlist)} stations")
 
     # === POSTER METODE ===
     def showDefaultPoster(self):
@@ -2197,30 +2690,35 @@ class CiefpVibesMain(Screen):
 
         name, url = self.playlist[self.currentIndex]
 
-        # === NOVO: OBRADA FTP URL-ova ===
+        # === OBRADA FTP URL-ova ===
         if url.startswith('ftp://'):
             print(f"[CiefpVibes] FTP file detected: {url}")
-            # Skini fajl lokalno pre sviranja
             local_path = self.download_ftp_file(url)
             if local_path:
-                # Zameni URL sa lokalnom putanjom
                 url = local_path
                 print(f"[CiefpVibes] Downloaded to: {local_path}")
             else:
                 self["nowplaying"].setText(f"⚠ Download failed: {name}")
                 return
+
         if not self.playlist or not (0 <= self.currentIndex < len(self.playlist)):
             return
 
         # RESETUJ kontrolu postera za novu pesmu
         self.poster_locked = False
         self.poster_change_count = 0
-
-        # Resetuj folder cover keš za novu pesmu
-        # (ovo će forsirati ponovno traženje lokalnog postera)
         self.folderCoverCache = {}
 
         name, url = self.playlist[self.currentIndex]
+
+        # Da li je satelitski radio? (format 1:0:2:... ili 1:0:A:...)
+        is_satellite_radio = False
+        if isinstance(url, str):
+            parts = url.split(':')
+            if len(parts) >= 4 and parts[0] == '1' and parts[1] == '0':
+                service_type = parts[2].upper()
+                if service_type == '2' or service_type == 'A' or service_type == '10':
+                    is_satellite_radio = True
 
         # Da li je lokalni fajl?
         is_local_file = url.startswith('/') or url.startswith('file://')
@@ -2229,41 +2727,35 @@ class CiefpVibesMain(Screen):
 
         if is_local_file:
             self.current_poster_path = ""
-        # ako je online stream -> ostavi current_poster_path kakav jeste
 
         # ZA ONLINE STREAM, POSTAVI POSEBNA PRAVILA
         if is_online_stream:
             self.is_current_stream_online = True
             self.max_poster_changes = 10
             self.poster_search_delay = 8
-
-            # Resetuj praćenje naslova
             self.last_displayed_title = ""
 
-            # Postavi callback za timer (sada je metoda već definisana)
             if not self.poster_search_timer.callback:
                 self.poster_search_timer.callback.append(self.delayedPosterSearch)
 
-            # Kreiraj timer za automatsko ažuriranje ako već ne postoji
             if not hasattr(self, 'auto_title_update_timer') or self.auto_title_update_timer is None:
                 self.auto_title_update_timer = eTimer()
                 self.auto_title_update_timer.callback.append(self.autoUpdateTitle)
 
-            # POKRENI FORCE REFRESH TIMER (DODAJTE OVO)
             if hasattr(self, 'force_refresh_timer'):
-                self.force_refresh_timer.stop()  # Zaustavi prethodni ako postoji
+                self.force_refresh_timer.stop()
             else:
                 self.force_refresh_timer = eTimer()
                 self.force_refresh_timer.callback.append(self.forceRefreshMetadata)
 
-            self.force_refresh_timer.start(10000, False)  # 10 sekundi
-
+            self.force_refresh_timer.start(10000, False)
             print(f"[CiefpVibes] Online stream detected - auto title updates enabled")
         else:
             self.is_current_stream_online = False
-            self.max_poster_changes = 3  # Standardno za lokalne fajlove
-            self.poster_locked = False  # Resetuj za lokalne fajlove
+            self.max_poster_changes = 3
+            self.poster_locked = False
 
+        # === OBRADA LOKALNIH FAJLOVA ===
         if is_local_file:
             filepath = url.replace('file://', '')
             if os.path.isfile(filepath):
@@ -2352,35 +2844,75 @@ class CiefpVibesMain(Screen):
                 self["nowplaying"].setText(f"▶ {name}")
                 self.showDefaultPoster()
 
+        # === OBRADA ONLINE STREAMOVA ===
         elif is_online_stream:
-            # ONLINE STREAM LOGIC
             self["nowplaying"].setText(f"▶ {name}")
-
-            # Za online stream, odmah pokušaj da dobiješ poster iz metapodataka
-            # Resetuj trenutne podatke o pesmi
             self.current_song_info = {"artist": "", "title": ""}
-
-            # Prvo prikaži default poster
             self.showDefaultPoster()
 
-            # === NOVO: Pokušaj fallback iz naziva pesme ODMAH ===
-            # Mnogi GitHub streamovi nemaju ICY podatke, pa parsiraj iz naziva
             artist_from_name, title_from_name = self.parseArtistTitle(name)
             if artist_from_name or title_from_name:
                 self.current_song_info["artist"] = artist_from_name
                 self.current_song_info["title"] = title_from_name
                 print(f"[CiefpVibes] Fallback metadata from playlist name: {artist_from_name} - {title_from_name}")
                 self.updateNowPlayingText()
-                # Odmah pokušaj poster na osnovu ovoga
                 self.updatePosterFromMetadata(force_update=True)
 
-            # Sačuvaj informaciju da je ovo online stream
             self.is_current_stream_online = True
+        # === OBRADA SATELITSKOG RADIJA ===
+        elif is_satellite_radio:
+            print(f"[CiefpVibes] Satellite radio detected: {url}")
 
-        else:
-            # Ostali tipovi (npr. file:// URL)
-            self["nowplaying"].setText(f"▶ {name}")
+            # Resetuj poster
+            self.current_poster_path = ""
+            self.poster_locked = False
+            self.poster_change_count = 0
             self.showDefaultPoster()
+
+            # Resetuj RDS
+            self.last_rds_text = ""  # <-- DODAJ OVO
+
+            # Postavi naziv
+            self["nowplaying"].setText(f"📻 {name}")
+            self.is_current_stream_online = True
+            self.is_dvb_radio = True
+            self.current_dvb_service_ref = url
+
+            # === ODMAH POKUŠAJ DA DOHVATIŠ EPG I RDS ===
+            try:
+                epg_event = get_current_epg_event()
+                epg_title = epg_event.get('name') if epg_event else ""
+
+                # Dohvati RDS
+                rds_text = ""
+                try:
+                    from Screens.InfoBar import InfoBar
+                    if InfoBar.instance:
+                        service = InfoBar.instance.session.nav.getCurrentService()
+                        if service and hasattr(service, "rdsDecoder"):
+                            decoder = service.rdsDecoder()
+                            if decoder:
+                                txt = decoder.getText()
+                                if txt:
+                                    rds_text = txt.strip()
+                                    self.last_rds_text = rds_text
+                except:
+                    pass
+
+                display = f"📻 {name}"
+                if epg_title:
+                    display += f" • {epg_title}"
+                if rds_text:
+                    if len(rds_text) > 35:
+                        rds_short = rds_text[:32] + "..."
+                    else:
+                        rds_short = rds_text
+                    display += f" • {rds_short}"
+
+                self["nowplaying"].setText(display)
+                print(f"[CiefpVibes] Immediate: {display}")
+            except Exception as e:
+                print(f"[CiefpVibes] Immediate error: {e}")
 
         # STREAM STATUS RESET
         self.stream_active = True
@@ -2393,7 +2925,6 @@ class CiefpVibesMain(Screen):
         self["progress_real"].show()
         self["progress_vibe"].show()
 
-        # ==== NOVO: UVIJEK POČNI OD NULE ====
         try:
             service = self.session.nav.getCurrentService()
             if service:
@@ -2402,11 +2933,27 @@ class CiefpVibesMain(Screen):
                     seek.seekTo(0)
         except:
             pass
-        # ====================================
+        # === POKRENI PESMU ===
+        if is_satellite_radio:
+            # SATELITSKI RADIO - koristi DVB service (NE HTTP)
+            try:
+                # Postavi flag PRE nego što se pokrene service
+                self.is_dvb_radio = True  # <-- DODAJ OVO OVDE
 
-        # POKRENI PESMU
-        ref = eServiceReference(4097, 0, url)
-        ref.setName(name)
+                # Direktno kreiraj eServiceReference iz service_ref stringa
+                ref = eServiceReference(url)
+                print(f"[CiefpVibes] Playing satellite radio with DVB service: {url}")
+            except Exception as e:
+                print(f"[CiefpVibes] Error creating DVB service: {e}")
+                ref = eServiceReference(4097, 0, url)
+                ref.setName(name)
+                self.is_dvb_radio = False
+        else:
+            # HTTP stream ili lokalni fajl
+            ref = eServiceReference(4097, 0, url)
+            ref.setName(name)
+            self.is_dvb_radio = False
+
         self.session.nav.playService(ref)
 
         # Probaj da ukloniš pauzu
@@ -2420,7 +2967,7 @@ class CiefpVibesMain(Screen):
         self.progress_timer.start(200, False)
         self.vibe_timer.start(200, False)
         self.stream_check_timer.start(2000, False)
-        
+
     def playSelected(self):
         idx = self["playlist"].index
         if 0 <= idx < len(self.playlist):
@@ -2504,6 +3051,63 @@ class CiefpVibesMain(Screen):
         new_metadata = False
 
         if info:
+            # === ZA DVB RADIO (SATELITSKI) - EPG + RDS ===
+            if hasattr(self, 'is_dvb_radio') and self.is_dvb_radio:
+                # Dohvati EPG
+                epg_title = ""
+                try:
+                    epg_event = get_current_epg_event()
+                    if epg_event and epg_event.get('name'):
+                        epg_title = epg_event['name']
+                except:
+                    pass
+
+                # KORISTI SAČUVANI RDS (iz updateEPG)
+                rds_text = self.last_rds_text if hasattr(self, 'last_rds_text') else ""
+
+                # Formiraj prikaz
+                if self.playlist and 0 <= self.currentIndex < len(self.playlist):
+                    name = self.playlist[self.currentIndex][0]
+                    display = f"📻 {name}"
+
+                    if epg_title:
+                        display += f" • {epg_title}"
+
+                    if rds_text:
+                        if len(rds_text) > 50:
+                            rds_short = rds_text[:48] + "..."
+                        else:
+                            rds_short = rds_text
+                        display += f" • {rds_short}"
+
+                    self["nowplaying"].setText(display)
+
+                    if epg_title and epg_title != self.last_displayed_title:
+                        self.last_displayed_title = epg_title
+                        print(f"[CiefpVibes] EPG: {epg_title}")
+                else:
+                    display = "📻"
+                    if epg_title:
+                        display += f" {epg_title}"
+                    if rds_text:
+                        display += f" • {rds_text[:30]}"
+                    self["nowplaying"].setText(display)
+
+                # Progress bar
+                seek = service.seek()
+                if seek:
+                    pos = seek.getPlayPosition()
+                    dur = seek.getLength()
+                    if pos[0] and dur[0]:
+                        self.current_position = pos[1]
+                        self.current_duration = dur[1]
+                        if self.current_duration > 0:
+                            percentage = int((self.current_position * 100) / self.current_duration)
+                            self["progress_real"].setValue(percentage)
+                return
+
+
+            # === OSTATAK KODA ZA HTTP STREAMOVE ===
             raw_title = info.getInfoString(iServiceInformation.sTagTitle).strip()
             artist_tag = info.getInfoString(iServiceInformation.sTagArtist)
             title_tag = info.getInfoString(iServiceInformation.sTagTitle)
@@ -3433,6 +4037,15 @@ class CiefpVibesMain(Screen):
         self["progress_vibe"].setValue(self.vibe_value)
 
     # === EXIT ===
+    def exit(self):
+        self.session.nav.stopService()
+        self.progress_timer.stop()
+        self.vibe_timer.stop()
+        self.stream_check_timer.stop()
+        if hasattr(self, 'epg_timer'):
+            self.epg_timer.stop()
+        self.saveConfig()
+        self.close()
     
     def exit(self):
         self.session.nav.stopService()
