@@ -417,7 +417,7 @@ class CiefpVibesMain(Screen):
         ib = getattr(self, "current_ib", "infobar5.png")
 
         return '''<?xml version="1.0" encoding="utf-8"?>
-        <screen position="0,0" size="1920,1080" flags="wfNoBorder" backgroundColor="transparent">
+        <screen position="center,center" size="1920,1080" flags="wfNoBorder" backgroundColor="transparent">
             <ePixmap pixmap="%s/backgrounds/%s" position="0,0" size="1920,1080" alphatest="blend" zPosition="-1"/>
             <widget name="source_label" position="50,50" size="1150,45"
         font="Regular;42" foregroundColor="#FFFFFF"

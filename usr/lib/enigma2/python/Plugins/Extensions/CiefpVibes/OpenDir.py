@@ -83,7 +83,7 @@ class OpenDirectoryMain(Screen):
 
     def buildSkin(self):
         return '''
-        <screen position="0,0" size="1920,1080" flags="wfNoBorder" backgroundColor="transparent">
+        <screen position="center,center" size="1920,1080" flags="wfNoBorder" backgroundColor="transparent">
 
             <!-- Pozadina -->
             <ePixmap pixmap="%s/backgrounds/background7.png" position="0,0" size="1920,1080" alphatest="blend" zPosition="-1"/>
@@ -337,7 +337,7 @@ class OpenDirectoryContent(Screen):
 
     def buildSkin(self):
         return '''
-        <screen position="0,0" size="1920,1080" flags="wfNoBorder" backgroundColor="transparent">
+        <screen position="center,center" size="1920,1080" flags="wfNoBorder" backgroundColor="transparent">
 
             <!-- Pozadina -->
             <ePixmap pixmap="%s/backgrounds/background7.png" position="0,0" size="1920,1080" alphatest="blend" zPosition="-1"/>
@@ -363,7 +363,7 @@ class OpenDirectoryContent(Screen):
                         )
                     ],
                     "fonts": [gFont("Regular", 32)],
-                    "itemHeight": 52}
+                    "itemHeight": 50}
                 </convert>
             </widget>
 
@@ -730,7 +730,7 @@ class OpenDirectoryScrape(Screen):
 
     def buildSkin(self):
         return '''
-        <screen position="0,0" size="1920,1080" flags="wfNoBorder" backgroundColor="transparent">
+        <screen position="center,center" size="1920,1080" flags="wfNoBorder" backgroundColor="transparent">
             <ePixmap pixmap="%s/backgrounds/background7.png" position="0,0" size="1920,1080" alphatest="blend" zPosition="-1"/>
 
             <widget name="info" position="50,50" size="1820,50" font="Regular;32" halign="center" foregroundColor="#00ff00" transparent="1" zPosition="4"/>

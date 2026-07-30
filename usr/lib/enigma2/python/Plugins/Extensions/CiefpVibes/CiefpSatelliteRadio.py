@@ -197,15 +197,19 @@ class CiefpSatelliteRadioScreen(Screen):
 
     def buildSkin(self):
         return '''<?xml version="1.0" encoding="utf-8"?>
-        <screen position="center,center" size="1300,900" title="Ciefp Satellite Radio (lamedb)" backgroundColor="#01053b">
+        <screen position="center,center" size="1920,1080"  backgroundColor="#01053b">
+            <widget name="separator0" position="0,0" size="1920,3" backgroundColor="#d5fa02" zPosition="1" /> 
+            <eLabel position="0,0" size="1920,100" backgroundColor="#2e0130" zPosition="-1" />
+            <eLabel text="..:: Ciefp Satellite Radio (lamedb) ::.." position="60,25" size="800,60" font="Regular;40" foregroundColor="#ffffff" backgroundColor="#2e0130" transparent="1" />
+            <widget name="separator1" position="0,90" size="1920,3" backgroundColor="#d5fa02" zPosition="1" />  
             <!-- SLIKA NA DESNOJ STRANI -->
-            <widget name="sat_image" position="900,20" size="400,860" pixmap="/usr/lib/enigma2/python/Plugins/Extensions/CiefpVibes/satellite.png" alphatest="on" zPosition="1"/>
+            <widget name="sat_image" position="900,100" size="1000,800" pixmap="/usr/lib/enigma2/python/Plugins/Extensions/CiefpVibes/satellite.png" alphatest="on" zPosition="1"/>
 
             <!-- NASLOV -->
-            <widget name="title_label" position="30,20" size="850,40" font="Regular;28" foregroundColor="#ffcc00" transparent="1"/>
+            <widget name="title_label" position="500,950" size="850,40" font="Regular;28" foregroundColor="#ffcc00" transparent="1"/>
 
             <!-- LISTA SATELITA -->
-            <widget source="sat_list" render="Listbox" position="30,80" size="850,720" transparent="1" scrollbarMode="showOnDemand" zPosition="2">
+            <widget source="sat_list" render="Listbox" position="30,100" size="850,800" transparent="1" scrollbarMode="showOnDemand" zPosition="2">
                 <convert type="TemplatedMultiContent">
                     {"template": [
                         MultiContentEntryText(pos=(20, 10), size=(800, 40), font=0, flags=RT_HALIGN_LEFT|RT_VALIGN_CENTER, text=0)
@@ -214,12 +218,11 @@ class CiefpSatelliteRadioScreen(Screen):
                     "itemHeight": 50}
                 </convert>
             </widget>
-
+            <widget name="separator2" position="0,900" size="1920,3" backgroundColor="#d5fa02" zPosition="1" /> 
             <!-- BACK DUGME -->
-            <widget name="key_red" position="30,830" size="250,40" font="Regular;30" foregroundColor="#ff5555" transparent="1"/>
+            <widget name="key_red" position="150,950" size="250,40" font="Regular;30" foregroundColor="#d5fa02" transparent="1"/>
 
-            <!-- SATELITSKA IKONICA (mala) -->
-            <widget name="sat_icon" position="1180,830" size="50,50" pixmap="/usr/lib/enigma2/python/Plugins/Extensions/CiefpVibes/sat_icon.png" alphatest="on" zPosition="1"/>
+            <eLabel position="0,900" size="1920,150" backgroundColor="#2e0130" zPosition="-1" />
         </screen>'''
 
     def __init__(self, session):
@@ -230,8 +233,12 @@ class CiefpSatelliteRadioScreen(Screen):
         # Dodaj widget za sliku
         from Components.Pixmap import Pixmap
         self["sat_image"] = Pixmap()
-        self["sat_icon"] = Pixmap()
 
+        # Separatori
+        self["separator0"] = Label()
+        self["separator1"] = Label()
+        self["separator2"] = Label()
+        self["separator3"] = Label()
         self["title_label"] = Label("Učitavam satelitske radio stanice...")
         self["key_red"] = Label("✖ Back")
 
