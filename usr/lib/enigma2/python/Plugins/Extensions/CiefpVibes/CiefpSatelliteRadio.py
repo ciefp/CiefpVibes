@@ -192,6 +192,121 @@ def get_satellite_radio_from_lamedb():
     return satellites
 
 
+def get_dab_radio_from_bouquets():
+    """
+    Čita DAB+ radio stanice iz /etc/enigma2/userbouquet.*.radio fajlova.
+    DAB+ linije imaju prefiks 4115:0:2:.
+
+    Vraća: {"Buket Ime": [(station_name, service_ref), ...], ...}
+    """
+    bouquet_dir = "/etc/enigma2"
+    dab_bouquets = {}
+
+    if not os.path.exists(bouquet_dir):
+        print("[CiefpDAB] /etc/enigma2 ne postoji")
+        return dab_bouquets
+
+    try:
+        # Nađi sve userbouquet.*.radio fajlove
+        for filename in os.listdir(bouquet_dir):
+            if not filename.startswith("userbouquet.") or not filename.endswith(".radio"):
+                continue
+
+            filepath = os.path.join(bouquet_dir, filename)
+            bouquet_name = filename  # default ako nema #NAME
+            stations = []
+
+            try:
+                with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
+                    lines = f.readlines()
+
+                for i, line in enumerate(lines):
+                    line = line.strip()
+
+                    # Ime buketa
+                    if line.startswith("#NAME"):
+                        bouquet_name = line[5:].strip()
+                        continue
+
+                    # DAB+ servis
+                    if line.startswith("#SERVICE 4115:"):
+                        # Format: #SERVICE 4115:0:2:SID:TSID:ONID:NS:PARENT_SID:PARENT_TSID:UNUSED:URL:NAME
+                        service_line = line[9:].strip()  # skini "#SERVICE "
+                        parts = service_line.split(":")
+
+                        if len(parts) < 11:
+                            continue
+
+                        # Ime stanice - iz DESCRIPTION linije (pouzdanije)
+                        station_name = ""
+                        if i + 1 < len(lines) and lines[i + 1].strip().startswith("#DESCRIPTION"):
+                            station_name = lines[i + 1].strip()[13:].strip()
+
+                        # Fallback: ime iz zadnjeg dela reference
+                        if not station_name:
+                            # URL može sadržati ":" pa spajamo sve do zadnjeg
+                            # Poslednji deo posle zadnjeg ":" je ime
+                            # npr. dab%3a//228.10.1.5%3a10010:1LIVE
+                            rest = ":".join(parts[10:])
+                            if ":" in rest:
+                                station_name = rest.rsplit(":", 1)[-1]
+                            else:
+                                station_name = rest
+
+                        station_name = station_name.strip()
+                        if not station_name:
+                            station_name = "Unknown DAB"
+
+                        # NE diraj %3a — ostavi originalni service_ref iz buketa!
+                        service_ref = service_line
+
+                        stations.append((station_name, service_ref))
+
+            except Exception as e:
+                print("[CiefpDAB] Greška pri čitanju %s: %s" % (filename, str(e)))
+                continue
+
+            if stations:
+                # Ako ime buketa nije lepo, uzmi iz fajla
+                display_name = bouquet_name
+                if display_name.startswith("userbouquet."):
+                    display_name = display_name.replace("userbouquet.", "").replace(".radio", "")
+                display_name = display_name.replace("_", " ").strip()
+
+                dab_bouquets[display_name] = stations
+                print("[CiefpDAB] Buket '%s': %d stanica" % (display_name, len(stations)))
+
+        print("[CiefpDAB] Ukupno %d DAB+ buketa" % len(dab_bouquets))
+
+    except Exception as e:
+        print("[CiefpDAB] Greška: %s" % str(e))
+        import traceback
+        traceback.print_exc()
+
+    return dab_bouquets
+
+
+def is_dab_available():
+    """Proverava da li na boxu postoje DAB+ buketi."""
+    bouquet_dir = "/etc/enigma2"
+    if not os.path.exists(bouquet_dir):
+        return False
+    try:
+        for filename in os.listdir(bouquet_dir):
+            if filename.startswith("userbouquet.") and filename.endswith(".radio"):
+                filepath = os.path.join(bouquet_dir, filename)
+                try:
+                    with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
+                        content = f.read()
+                        if "4115:" in content:
+                            return True
+                except:
+                    pass
+    except:
+        pass
+    return False
+
+
 class CiefpSatelliteRadioScreen(Screen):
     """Ekran za prikaz satelita i vraćanje selektovanih kanala u CiefpVibes"""
 
@@ -307,6 +422,110 @@ class CiefpSatelliteRadioScreen(Screen):
         sat_key = current[1]
         stations_list = self.sat_data[sat_key]
         
+        self.close(stations_list)
+
+    def closeError(self, answer=None):
+        self.close(None)
+
+    def closeCancel(self):
+        self.close(None)
+
+class CiefpDABRadioScreen(Screen):
+    """Ekran za prikaz DAB+ buketa i stanica."""
+
+    def buildSkin(self):
+        return '''<?xml version="1.0" encoding="utf-8"?>
+        <screen position="center,center" size="1920,1080" backgroundColor="#01053b">
+            <widget name="separator0" position="0,0" size="1920,3" backgroundColor="#d5fa02" zPosition="1" />
+            <eLabel position="0,0" size="1920,100" backgroundColor="#2e0130" zPosition="-1" />
+            <eLabel text="..:: Ciefp DAB+ Radio (Bouquets) ::.." position="60,25" size="900,60" font="Regular;40" foregroundColor="#ffffff" backgroundColor="#2e0130" transparent="1" />
+            <widget name="separator1" position="0,90" size="1920,3" backgroundColor="#d5fa02" zPosition="1" />
+
+            <widget name="dab_image" position="900,100" size="1000,800" pixmap="/usr/lib/enigma2/python/Plugins/Extensions/CiefpVibes/satellite.png" alphatest="on" zPosition="1"/>
+
+            <widget name="title_label" position="500,950" size="850,40" font="Regular;28" foregroundColor="#ffcc00" transparent="1"/>
+
+            <widget source="dab_list" render="Listbox" position="30,100" size="850,800" transparent="1" scrollbarMode="showOnDemand" zPosition="2">
+                <convert type="TemplatedMultiContent">
+                    {"template": [
+                        MultiContentEntryText(pos=(20, 10), size=(800, 40), font=0, flags=RT_HALIGN_LEFT|RT_VALIGN_CENTER, text=0)
+                    ],
+                    "fonts": [gFont("Regular", 30)],
+                    "itemHeight": 50}
+                </convert>
+            </widget>
+            <widget name="separator2" position="0,900" size="1920,3" backgroundColor="#d5fa02" zPosition="1" />
+
+            <widget name="key_red" position="150,950" size="250,40" font="Regular;30" foregroundColor="#d5fa02" transparent="1"/>
+
+            <eLabel position="0,900" size="1920,150" backgroundColor="#2e0130" zPosition="-1" />
+        </screen>'''
+
+    def __init__(self, session):
+        Screen.__init__(self, session)
+        self.session = session
+        self.skin = self.buildSkin()
+
+        from Components.Pixmap import Pixmap
+        self["dab_image"] = Pixmap()
+
+        self["separator0"] = Label()
+        self["separator1"] = Label()
+        self["separator2"] = Label()
+        self["title_label"] = Label("Učitavam DAB+ stanice...")
+        self["key_red"] = Label("✖ Back")
+
+        self.dab_data = {}
+        self.ui_list = []
+        self["dab_list"] = List([])
+
+        self["actions"] = ActionMap(["SetupActions", "ColorActions"], {
+            "ok": self.selectBouquet,
+            "cancel": self.closeCancel,
+            "red": self.closeCancel
+        }, -1)
+
+        self.error_timer = eTimer()
+        try:
+            self.error_timer_conn = self.error_timer.timeout.connect(self.showErrorAndClose)
+        except:
+            self.error_timer.callback.append(self.showErrorAndClose)
+
+        self.onLayoutFinish.append(self.parseAndLoad)
+
+    def parseAndLoad(self):
+        self.dab_data = get_dab_radio_from_bouquets()
+
+        if not self.dab_data:
+            self.error_timer.start(100, True)
+            return
+
+        self["title_label"].setText("Select a DAB+ bouquet:")
+
+        self.ui_list = []
+        for bouquet_name in sorted(self.dab_data.keys()):
+            count = len(self.dab_data[bouquet_name])
+            self.ui_list.append((f"📻 {bouquet_name} ({count} stations)", bouquet_name))
+
+        self["dab_list"].setList(self.ui_list)
+
+    def showErrorAndClose(self):
+        self.session.openWithCallback(
+            self.closeError,
+            MessageBox,
+            "Nema DAB+ buketa!\n\n"
+            "DAB+ zahteva OpenATV 8.0 develop ili noviji.\n"
+            "Proverite da li imate userbouquet.*.radio\n"
+            "sa 4115: prefiksom u /etc/enigma2/.",
+            MessageBox.TYPE_WARNING
+        )
+
+    def selectBouquet(self):
+        current = self["dab_list"].getCurrent()
+        if not current:
+            return
+        bouquet_key = current[1]
+        stations_list = self.dab_data[bouquet_key]
         self.close(stations_list)
 
     def closeError(self, answer=None):

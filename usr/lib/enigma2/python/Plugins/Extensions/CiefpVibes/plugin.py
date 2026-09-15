@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 from __future__ import print_function
+from .picon_manager import PiconManager
 import os
 import json 
 import shutil
@@ -36,11 +37,13 @@ except ImportError:
     print("[CiefpVibes] OpenDirDownloader not available")
 # Satellite Radio Lamedb Modul
 try:
-    from .CiefpSatelliteRadio import CiefpSatelliteRadioScreen
+    from .CiefpSatelliteRadio import CiefpSatelliteRadioScreen, CiefpDABRadioScreen, is_dab_available
     SAT_RADIO_AVAILABLE = True
-    print("[CiefpVibes] CiefpSatelliteRadio loaded successfully!")
+    DAB_RADIO_AVAILABLE = True
+    print("[CiefpVibes] CiefpSatelliteRadio + DAB loaded!")
 except ImportError as e:
     SAT_RADIO_AVAILABLE = False
+    DAB_RADIO_AVAILABLE = False
     print(f"[CiefpVibes] CiefpSatelliteRadio import error: {e}")
 # Na vrhu fajla, posle import-ova:
 try:
@@ -65,24 +68,19 @@ except:
     pass
 
 def is_satellite_radio_service(service_ref):
-    """
-    Proverava da li je service_ref satelitski radio.
-    Podržava samo RADIO tipove:
-    - 1:0:2:... (Radio)
-    - 1:0:A:... (Tip 10 - Radio sa extended codec)
-    NE uključuje tip 1 (TV)
-    """
     if not service_ref:
         return False
-
     if isinstance(service_ref, str):
         parts = service_ref.split(':')
         if len(parts) >= 4:
-            # Proveri prva 3 polja: 1:0:2 ili 1:0:A
-            if parts[0] == '1' and parts[1] == '0':
-                service_type = parts[2].upper()
-                # SAMO radio tipovi: 2 ili A (10)
-                if service_type == '2' or service_type == 'A' or service_type == '10':
+            reftype = parts[0]
+            # DAB+ — prihvati SVE service type-ove (1, 2, A, 10)
+            if reftype == '4115':
+                return True
+            # DVB radio
+            if reftype == '1' and parts[1] == '0':
+                service_type = parts[2].upper() if len(parts) > 2 else ''
+                if service_type in ('2', 'A', '10'):
                     return True
     return False
 
@@ -368,7 +366,7 @@ config.plugins.ciefpTmpCache.auto_clear = ConfigSelection(default="500", choices
 
 PLUGIN_NAME = "CiefpVibes"
 PLUGIN_DESC = "Jukebox play music locally and online"
-PLUGIN_VERSION = "2.4"
+PLUGIN_VERSION = "2.5"
 PLUGIN_DIR = os.path.dirname(__file__) or "/usr/lib/enigma2/python/Plugins/Extensions/CiefpVibes"
 CACHE_DIR = "/tmp/ciefpvibes_cache"
 os.makedirs(CACHE_DIR, exist_ok=True)
@@ -410,6 +408,15 @@ GITHUB_M3U_ARTIST_URL = "https://api.github.com/repos/ciefp/CiefpVibesFiles/cont
 GITHUB_M3U_MIX_URL = "https://api.github.com/repos/ciefp/CiefpVibesFiles/contents/M3U-MIX"
 GITHUB_TV_URL = "https://api.github.com/repos/ciefp/CiefpVibesFiles/contents/TV"
 GITHUB_RADIO_URL = "https://api.github.com/repos/ciefp/CiefpVibesFiles/contents/RADIO"
+# GitHub URL za DAB+ bukete
+GITHUB_DAB_URL = "https://api.github.com/repos/ciefp/CiefpVibesFiles/contents/DAB_RADIO"
+
+# Lokalni folder za DAB+ bukete (za OpenATV Radio listu)
+DAB_BOUQUET_DIR = "/etc/enigma2"
+
+# Cache folder za privremene DAB+ bukete
+DAB_CACHE_DIR = "/tmp/ciefpvibes_dab_cache"
+os.makedirs(DAB_CACHE_DIR, exist_ok=True)
 
 class CiefpVibesMain(Screen):
     def buildSkin(self):
@@ -419,10 +426,12 @@ class CiefpVibesMain(Screen):
         return '''<?xml version="1.0" encoding="utf-8"?>
         <screen position="center,center" size="1920,1080" flags="wfNoBorder" backgroundColor="transparent">
             <ePixmap pixmap="%s/backgrounds/%s" position="0,0" size="1920,1080" alphatest="blend" zPosition="-1"/>
-            <widget name="source_label" position="50,50" size="1150,45"
-        font="Regular;42" foregroundColor="#FFFFFF"
-        transparent="1" zPosition="4"/>
-            <widget source="playlist" render="Listbox" position="50,100" size="1150,770" transparent="1" scrollbarMode="showOnDemand" zPosition="2">
+
+            <!-- Gornji deo sa listom pesama (sada malo manji da bi infobar bio veći) -->
+            <widget name="source_label" position="50,20" size="1150,45"
+                    font="Regular;42" foregroundColor="#FFFFFF"
+                    transparent="1" zPosition="4"/>
+            <widget source="playlist" render="Listbox" position="50,70" size="1150,700" transparent="1" scrollbarMode="showOnDemand" zPosition="2">
                 <convert type="TemplatedMultiContent">
                     {"template": [
                         MultiContentEntryText(pos=(20, 5), size=(1080, 36), font=0, flags=RT_HALIGN_LEFT|RT_VALIGN_CENTER, text=0),
@@ -432,19 +441,37 @@ class CiefpVibesMain(Screen):
                     "itemHeight": 70}
                 </convert>
             </widget>
-            <ePixmap pixmap="%s/infobars/%s" position="0,880" size="1920,140" alphatest="blend" zPosition="1"/>
-            <widget name="poster" position="1220,70" size="650,800" alphatest="on" zPosition="1"/>
-            <widget name="nowplaying" position="60,900" size="1800,55" font="Regular;40" foregroundColor="#FFFFFF" transparent="1" zPosition="4"/>
-            <widget name="time" position="1600,965" size="200,40" font="Regular;32" halign="center" valign="center" foregroundColor="#ffffff" transparent="1" zPosition="3"/>
-            <widget name="progress_real" position="240,985" size="1150,20" pixmap="skin_default/progress_bg.png" zPosition="2"/>
-            <widget name="progress_vibe" position="240,985" size="1150,20" pixmap="%s/progress_green.png" zPosition="3"/>
-            <widget name="offline_status" position="240,985" size="1150,20" font="Regular;18" foregroundColor="#ff3333" halign="center" valign="center" transparent="0" backgroundColor="#000000" zPosition="4"/>
+
+            <!-- Pozadina postera (ostaje ista) -->
+            <widget name="poster" position="1250,20" size="650,800" alphatest="on" zPosition="1"/>
+
+            <!-- NOVI INFOBAR - POZADINA -->
+            <ePixmap pixmap="%s/infobars/%s" position="0,820" size="1920,200" alphatest="blend" zPosition="1"/>
+
+            <!-- PIKON (Logo stanice) - levo -->
+            <widget name="picon" position="20,850" size="220,132" alphatest="on" zPosition="3"/>
+
+            <!-- TEKST 1. RED - Naziv stanice / EPG -->
+            <widget name="nowplaying" position="260,840" size="1300,45" font="Bold;36" foregroundColor="#FFFFFF" transparent="1" zPosition="4"/>
+
+            <!-- VIBE DEO - Pulsirajuća linija između redova -->
+            <widget name="progress_vibe" position="260,900" size="1300,10" pixmap="%s/progress_green.png" zPosition="3"/>
+
+            <!-- TEKST 2. RED - Trenutna pesma / RDS -->
+            <widget name="current_song" position="260,920" size="1300,45" font="Bold;36" foregroundColor="#FFDD55" transparent="1" zPosition="4"/>
+
+            <!-- VREME - desno -->
+            <widget name="time" position="1600,920" size="300,60" font="Regular;48" halign="right" valign="center" foregroundColor="#ffffff" transparent="1" zPosition="3"/>
+
+            <!-- STATUS OFFLINE -->
+            <widget name="offline_status" position="260,950" size="1200,15" font="Regular;18" foregroundColor="#ff3333" halign="center" valign="center" transparent="0" backgroundColor="#000000" zPosition="4"/>
+
+            <!-- DONJI RED SA TASTERIMA -->
             <widget name="key_red"    position="60,1030"  size="260,50" font="Regular;32" foregroundColor="#ff5555" transparent="1" zPosition="3"/>
             <widget name="key_green"  position="350,1030" size="260,50" font="Regular;32" foregroundColor="#55ff55" transparent="1" zPosition="3"/>
             <widget name="key_yellow" position="640,1030" size="300,50" font="Regular;32" foregroundColor="#ffdd55" transparent="1" zPosition="3"/>
             <widget name="key_blue"   position="930,1030" size="260,50" font="Regular;32" foregroundColor="#5599ff" transparent="1" zPosition="3"/>
             <widget name="key_menu"   position="1200,1030" size="300,50" font="Regular;32" foregroundColor="#ffffff" transparent="1" zPosition="3"/>
-            <!-- DODAJTE OVAJ WIDGET ZA UPDATE STATUS -->
             <widget name="update_status" position="1250,1030" size="400,40" font="Regular;28" foregroundColor="#ffffff" halign="right" transparent="1" zPosition="3"/>
         </screen>''' % (PLUGIN_DIR, bg, PLUGIN_DIR, ib, PLUGIN_DIR)
 
@@ -521,7 +548,9 @@ class CiefpVibesMain(Screen):
         self.is_dvb_radio = False
         self["playlist"] = List([])
         self["nowplaying"] = Label("🌀 Loading...")
+        self["current_song"] = Label("")
         self["source_label"] = Label("")
+        self["picon"] = Pixmap()
         self["key_red"] = Label("EXIT")
         self["key_green"] = Label("FOLDER")
         self["key_yellow"] = Label("SETTINGS")
@@ -571,6 +600,16 @@ class CiefpVibesMain(Screen):
             iPlayableService.evStart: self.resetProgress,
             iPlayableService.evUser+10: self.onAudioData
         })
+
+        # Putanja do tvog default pikona u folderu plugina
+        plugin_dir = os.path.dirname(os.path.abspath(__file__))
+        default_picon_path = os.path.join(plugin_dir, "picons", "picon_default.png")
+
+        # Inicijalizacija sa /picon/ kao primarnom lokacijom za OpenATV
+        self.picon_mgr = PiconManager(
+            picon_path="/picon/",
+            default_picon_path=default_picon_path
+        )
         
         self.time_update_timer = eTimer()
         self.time_update_timer.callback.append(self.updateTime)
@@ -589,6 +628,7 @@ class CiefpVibesMain(Screen):
         self.onFirstExecBegin.append(self.loadLastOrDefault)
         self.current_song_info = {"artist": "", "title": ""}
         self.onLayoutFinish.append(self.showDefaultPoster)
+        self.onLayoutFinish.append(self.showDefaultPicon)
 
     def updateTime(self):
         try:
@@ -597,6 +637,42 @@ class CiefpVibesMain(Screen):
             self["time"].setText(t)
         except:
             pass
+
+    def showDefaultPicon(self):
+        """Prikaži default pikon odmah pri otvaranju plugina"""
+        try:
+            default_path = self.picon_mgr.get_default_picon()
+            if default_path and os.path.isfile(default_path):
+                from Tools.LoadPixmap import LoadPixmap
+                pixmap = LoadPixmap(default_path)
+                if pixmap and "picon" in self and self["picon"].instance:
+                    self["picon"].instance.setPixmap(pixmap)
+                    self["picon"].show()
+                    print(f"[CiefpVibes] Default picon shown: {default_path}")
+        except Exception as e:
+            print(f"[CiefpVibes] showDefaultPicon error: {e}")
+
+    def updatePicon(self, service_ref="", channel_name=""):
+        """Prikazuje pikon iz /picon/ ili učitava default pikon iz plugina ako pikon ne postoji"""
+        try:
+            pixmap = self.picon_mgr.get_picon_pixmap(service_ref, channel_name)
+            if pixmap and "picon" in self and self["picon"].instance:
+                self["picon"].instance.setPixmap(pixmap)
+                self["picon"].show()
+                print(f"[CiefpVibes] Picon updated for: {service_ref[:40]} / {channel_name}")
+            else:
+                print(f"[CiefpVibes] No pixmap for: {service_ref[:40]} / {channel_name}")
+        except Exception as e:
+            print(f"[CiefpVibes] updatePicon error: {e}")
+
+    def selectionChanged(self):
+        current = self["list"].getCurrent()
+        if current:
+            # Primer provere iz liste: current[1] = service_ref, current[0] = channel_name
+            service_ref = current[1] if len(current) > 1 else ""
+            channel_name = current[0] if len(current) > 0 else ""
+
+            self.updatePicon(service_ref, channel_name)
 
     def setSourceLabel(self, filepath="", display_name=""):
         """Prikazuje samo naziv (bez Online/Local), sa skraćivanjem dugih naziva."""
@@ -835,15 +911,19 @@ class CiefpVibesMain(Screen):
         if not hasattr(self, 'is_dvb_radio') or not self.is_dvb_radio:
             return
 
-        try:
-            # Dohvati EPG
-            epg_title = ""
-            epg_event = get_current_epg_event()
-            if epg_event and epg_event.get('name'):
-                epg_title = epg_event['name']
+        epg_title = ""
+        rds_text = ""
 
-            # Dohvati RDS preko rdsDecoder
-            rds_text = ""
+        try:
+            # 1. Dohvati EPG
+            try:
+                epg_event = get_current_epg_event()
+                if epg_event and epg_event.get('name'):
+                    epg_title = epg_event['name']
+            except Exception as e:
+                print(f"[CiefpVibes] EPG error: {e}")
+
+            # 2. Dohvati RDS preko rdsDecoder
             try:
                 from Screens.InfoBar import InfoBar
                 if InfoBar.instance:
@@ -855,7 +935,7 @@ class CiefpVibesMain(Screen):
                                 txt = decoder.getText()
                                 if txt:
                                     rds_text = txt.strip()
-                                    if rds_text != self.last_rds_text:
+                                    if hasattr(self, 'last_rds_text') and rds_text != self.last_rds_text:
                                         self.last_rds_text = rds_text
                                         print(f"[CiefpVibes] NEW RDS: {rds_text}")
                             except Exception as e:
@@ -863,44 +943,32 @@ class CiefpVibesMain(Screen):
             except Exception as e:
                 print(f"[CiefpVibes] RDS decoder error: {e}")
 
-            # Formiraj prikaz
+            # Ako nismo pročitali nov RDS, koristi sačuvani
+            if not rds_text and hasattr(self, 'last_rds_text'):
+                rds_text = self.last_rds_text
+
+            # 3. Formiraj prikaz u dva reda
             if self.playlist and 0 <= self.currentIndex < len(self.playlist):
-                name = self.playlist[self.currentIndex][0]
-                display = f"📻 {name}"
+                station_name = self.playlist[self.currentIndex][0]
+                # Ukloni stare EPG dodatke iz imena stanice ako postoje
+                if " • " in station_name:
+                    station_name = station_name.split(" • ")[0]
 
+                # 1. RED: Naziv radio stanice
+                line1 = f"📻 {station_name}"
+
+                # 2. RED: EPG / RDS podaci (emisija, izvođač, pesma...)
+                line2_parts = []
                 if epg_title:
-                    display += f" • {epg_title}"
-
+                    line2_parts.append(epg_title)
                 if rds_text:
-                    if len(rds_text) > 35:
-                        rds_short = rds_text[:32] + "..."
-                    else:
-                        rds_short = rds_text
-                    display += f" • {rds_short}"
+                    line2_parts.append(rds_text)
 
-                self["nowplaying"].setText(display)
-                print(f"[CiefpVibes] Prikaz: {display}")
+                line2 = " • ".join(line2_parts) if line2_parts else "Nema dodatnih informacija"
 
-        except Exception as e:
-            print(f"[CiefpVibes] EPG/RDS timer error: {e}")
-
-            # Formiraj prikaz
-            if self.playlist and 0 <= self.currentIndex < len(self.playlist):
-                name = self.playlist[self.currentIndex][0]
-                display = f"📻 {name}"
-
-                if epg_title:
-                    display += f" • {epg_title}"
-
-                if rds_text:
-                    if len(rds_text) > 50:
-                        rds_short = rds_text[:48] + "..."
-                    else:
-                        rds_short = rds_text
-                    display += f" • {rds_short}"
-
-                self["nowplaying"].setText(display)
-                print(f"[CiefpVibes] Prikaz: {display}")
+                self["nowplaying"].setText(line1)
+                self["current_song"].setText(line2)
+                print(f"[CiefpVibes] Sat Radio: {line1} | {line2}")
 
         except Exception as e:
             print(f"[CiefpVibes] EPG/RDS timer error: {e}")
@@ -1654,23 +1722,30 @@ class CiefpVibesMain(Screen):
             
     # === FILE BROWSER METODE ===
     def openFileBrowser(self):
-        """Otvori file browser - originalna radna verzija"""
         from Screens.ChoiceBox import ChoiceBox
 
-        # Izračunaj broj fajlova u TMP folderu
         tmp_files_count = self.count_tmp_audio_files()
+
+        # Proveri dostupnost DAB+
+        dab_available = DAB_RADIO_AVAILABLE and is_dab_available()
+
+        menu_items = [
+            ("💾 Local Storage", "local"),
+            ("💻 Network (Laptop)", "network"),
+            ("📡 Online Streams", "online"),
+            ("📻 Satellite Radio (lamedb)", "sat_radio"),
+        ]
+
+        if dab_available:
+            menu_items.append(("📶 DAB+ Radio (Bouquets)", "dab_radio"))
+
+        menu_items.append((f"🗑️ TMP/FTP Files ({tmp_files_count} files)", "tmp"))
 
         self.session.openWithCallback(
             self.browserTypeSelected,
             ChoiceBox,
             title="📁 Select Source",
-            list=[
-                ("💾 Local Storage", "local"),
-                ("💻 Network (Laptop)", "network"),
-                ("📡 Online Streams", "online"),
-                ("📻 Satellite Radio (lamedb)", "sat_radio"),
-                (f"🗑️ TMP/FTP Files ({tmp_files_count} files)", "tmp"),
-            ]
+            list=menu_items
         )
 
     def count_tmp_audio_files(self):
@@ -1697,26 +1772,17 @@ class CiefpVibesMain(Screen):
             return
 
         if choice[1] == "sat_radio":
-            # DEBUG: Prikaži šta se dešava
-            print(f"[CiefpVibes] SAT_RADIO_AVAILABLE = {SAT_RADIO_AVAILABLE}")
-            print(f"[CiefpVibes] Plugin dir = {PLUGIN_DIR}")
-            try:
-                import os
-                print(f"[CiefpVibes] Files in plugin dir: {os.listdir(PLUGIN_DIR)}")
-            except:
-                pass
-
             if not SAT_RADIO_AVAILABLE:
-                self.session.open(
-                    MessageBox,
-                    "❌ Satellite Radio module not available!\n\n"
-                    "Please check that CiefpSatelliteRadio.py\n"
-                    "is in the plugin folder.",
-                    MessageBox.TYPE_ERROR
-                )
+                self.session.open(MessageBox, "❌ Satellite Radio module not available!", MessageBox.TYPE_ERROR)
                 return
-            # Otvaramo satelitski modul
             self.session.openWithCallback(self.satelliteRadioClosed, CiefpSatelliteRadioScreen)
+            return
+
+        if choice[1] == "dab_radio":
+            if not DAB_RADIO_AVAILABLE:
+                self.session.open(MessageBox, "❌ DAB+ module not available!", MessageBox.TYPE_ERROR)
+                return
+            self.session.openWithCallback(self.dabRadioClosed, CiefpDABRadioScreen)
             return
 
         if choice[1] == "local":
@@ -1815,56 +1881,64 @@ class CiefpVibesMain(Screen):
         if result:
             # result je lista u formatu: [("Ime Stanice", "1:0:2:..."), ...]
 
-            # === DODAJ EPG UZ LISTU ===
             playlist_with_epg = []
 
             for station_name, service_ref in result:
-                # Pokušaj dohvatiti EPG za ovu stanicu
                 epg_text = ""
                 try:
-                    # Kreiraj eServiceReference za EPG lookup
                     ref = eServiceReference(service_ref)
                     if ref:
                         epg = eEPGCache.getInstance()
-                        event = epg.lookupEventTime(ref, -1, 0)  # Trenutni event
+                        event = epg.lookupEventTime(ref, -1, 0)
                         if event:
                             if isinstance(event, tuple) and len(event) >= 5:
                                 epg_text = str(event[2]) if len(event) > 2 else ""
                             elif hasattr(event, 'getEventName'):
                                 epg_text = event.getEventName() or ""
 
-                            # Skrati EPG ako je predugačak (30 karaktera)
                             if len(epg_text) > 30:
                                 epg_text = epg_text[:27] + "..."
+                            # Prikaži pikon za prvu stanicu
+                            if self.playlist:
+                                first_service_ref = self.playlist[0][1]
+                                first_name = self.playlist[0][0]
+                                self.updatePicon(first_service_ref, first_name)
                 except Exception as e:
                     print(f"[CiefpVibes] EPG lookup error for {station_name}: {e}")
 
-                # Formiraj naziv za prikaz - EPG u istoj liniji
-                if epg_text:
-                    display_name = f"{station_name} • {epg_text}"
-                else:
-                    display_name = station_name
+                # Čuvanje čistog imena i EPG-a u strukturi liste
+                playlist_with_epg.append((station_name, service_ref, epg_text))
 
-                playlist_with_epg.append((display_name, service_ref))
-
-            # Postavi playlistu sa EPG-om
+            # Postavi playlistu
             self.playlist = playlist_with_epg
-            self["playlist"].setList(self.playlist)
+            self["playlist"].setList([(sp[0], sp[2] if len(sp) > 2 else "") for sp in self.playlist])
             self["playlist"].index = 0
             self.currentIndex = 0
 
             # Resetuj DVB radio flag
-            self.is_dvb_radio = False
+            self.is_dvb_radio = True
             self.last_rds_text = ""
 
-            # === RESETUJ PRIKAZ ===
+            # === RESETUJ PRIKAZ U DVA ZASEBNA REDA ===
             self.setSourceLabel("", f"📡 Satellite Radio ({len(self.playlist)} stations)")
 
             if self.playlist:
-                # Prikaži prvu stanicu sa EPG-om
-                self["nowplaying"].setText(f"📻 {self.playlist[0][0]}")
+                station_name = self.playlist[0][0]
+                epg_info = self.playlist[0][2] if len(self.playlist[0]) > 2 and self.playlist[0][
+                    2] else "Satelitski Radio"
+
+                # 1. Red -> Naziv stanice
+                if "nowplaying" in self:
+                    self["nowplaying"].setText(f"📻 {station_name}")
+
+                # 2. Red -> EPG / RDS podaci
+                if "current_song" in self:
+                    self["current_song"].setText(epg_info)
             else:
-                self["nowplaying"].setText("📻 Satellite Radio - select a station")
+                if "nowplaying" in self:
+                    self["nowplaying"].setText("📻 Satellite Radio")
+                if "current_song" in self:
+                    self["current_song"].setText("Odaberite stanicu")
 
             # === RESETUJ POSTER ===
             self.current_poster_path = ""
@@ -1875,6 +1949,68 @@ class CiefpVibesMain(Screen):
             self.is_current_stream_online = True
 
             print(f"[CiefpVibes] Satellite radio loaded: {len(self.playlist)} stations")
+
+    def dabRadioClosed(self, result):
+        if not result:
+            return
+
+        playlist_with_epg = []
+        for station_name, service_ref in result:
+            # service_ref dolazi originalno iz buketa — NE DEKODIRAJ!
+            epg_text = ""
+            playlist_with_epg.append((station_name, service_ref, epg_text))
+
+        self.playlist = playlist_with_epg
+        for station_name, service_ref in result:
+            epg_text = ""
+            try:
+                ref = eServiceReference(service_ref)
+                if ref:
+                    epg = eEPGCache.getInstance()
+                    event = epg.lookupEventTime(ref, -1, 0)
+                    if event:
+                        if isinstance(event, tuple) and len(event) >= 5:
+                            epg_text = str(event[2]) if len(event) > 2 else ""
+                        elif hasattr(event, 'getEventName'):
+                            epg_text = event.getEventName() or ""
+                        if len(epg_text) > 30:
+                            epg_text = epg_text[:27] + "..."
+            except Exception as e:
+                print("[CiefpVibes] DAB EPG lookup error: %s" % str(e))
+
+            playlist_with_epg.append((station_name, service_ref, epg_text))
+
+        self.playlist = playlist_with_epg
+        self["playlist"].setList([(sp[0], sp[2] if len(sp) > 2 else "") for sp in self.playlist])
+        self["playlist"].index = 0
+        self.currentIndex = 0
+
+        self.is_dvb_radio = True
+        self.last_rds_text = ""
+
+        self.setSourceLabel("", f"📶 DAB+ Radio ({len(self.playlist)} stations)")
+
+        if self.playlist:
+            station_name = self.playlist[0][0]
+            epg_info = self.playlist[0][2] if len(self.playlist[0]) > 2 and self.playlist[0][2] else "DAB+ Radio"
+            if "nowplaying" in self:
+                self["nowplaying"].setText(f"📶 {station_name}")
+            if "current_song" in self:
+                self["current_song"].setText(epg_info)
+        else:
+            if "nowplaying" in self:
+                self["nowplaying"].setText("📶 DAB+ Radio")
+            if "current_song" in self:
+                self["current_song"].setText("Odaberite stanicu")
+
+        self.current_poster_path = ""
+        self.poster_locked = False
+        self.poster_change_count = 0
+        self.showDefaultPoster()
+
+        self.is_current_stream_online = True
+
+        print("[CiefpVibes] DAB+ radio loaded: %d stations" % len(self.playlist))
 
     # === POSTER METODE ===
     def showDefaultPoster(self):
@@ -2683,12 +2819,309 @@ class CiefpVibesMain(Screen):
             print(f"[CiefpVibes] Error clearing cache: {e}")
             return False, self.getCacheSize()
 
+    # === DAB RADIO  ===
+    def openDABOnlineBukets(self):
+        """Prikazuje listu DAB+ buketa sa GitHub-a."""
+        self["nowplaying"].setText("📶 Loading DAB+ bukets from GitHub...")
+
+        try:
+            req = urllib.request.Request(GITHUB_DAB_URL)
+            req.add_header("User-Agent", f"{PLUGIN_NAME}/{PLUGIN_VERSION}")
+
+            with urllib.request.urlopen(req, timeout=15) as response:
+                data = json.loads(response.read().decode('utf-8'))
+
+            if not data:
+                self.session.open(MessageBox, "No DAB+ bukets found on GitHub!", MessageBox.TYPE_WARNING)
+                self["nowplaying"].setText("Ready")
+                return
+
+            # Napravi listu za ChoiceBox
+            choices = []
+            for item in data:
+                if item.get("type") != "file":
+                    continue
+
+                name = item.get("name", "")
+                if not name.endswith(".radio"):
+                    continue
+
+                # Prelepo ime iz fajla
+                display = self._format_dab_buket_name(name)
+                dl_url = item.get("download_url", "")
+
+                if dl_url:
+                    choices.append((display, (dl_url, name)))
+
+            if not choices:
+                self.session.open(MessageBox, "No .radio files found!", MessageBox.TYPE_WARNING)
+                self["nowplaying"].setText("Ready")
+                return
+
+            choices.sort(key=lambda x: x[0].lower())
+
+            self.session.openWithCallback(
+                self.dabOnlineBuketSelected,
+                ChoiceBox,
+                title=f"📶 DAB+ Online Bukets ({len(choices)} available)",
+                list=choices
+            )
+
+            self["nowplaying"].setText(f"📶 {len(choices)} DAB+ bukets available")
+
+        except Exception as e:
+            print(f"[CiefpVibes] DAB online error: {e}")
+            self.session.open(MessageBox, f"❌ Error:\n{str(e)[:150]}", MessageBox.TYPE_ERROR)
+            self["nowplaying"].setText("Ready")
+
+    def _format_dab_buket_name(self, filename):
+        """Pretvara 'userbouquet.dab_bayern_7e_12567.radio' u 'Bayern (7°E)'."""
+        name = filename
+
+        # Ukloni ekstenziju
+        if name.endswith(".radio"):
+            name = name[:-6]
+
+        # Ukloni prefiks
+        name = name.replace("userbouquet.", "").replace("userbouquet_", "")
+
+        # Ukloni 'dab_' prefiks
+        if name.startswith("dab_"):
+            name = name[4:]
+
+        # Izvuci satelitsku poziciju ako postoji (npr. _7e_, _19e_, _23e_, _5w_)
+        import re
+        sat_match = re.search(r'_(\d+)([ew])_', name, re.IGNORECASE)
+        sat_info = ""
+
+        if sat_match:
+            deg = sat_match.group(1)
+            direction = sat_match.group(2).upper()
+            sat_info = f" ({deg}°{direction})"
+            # Ukloni iz imena
+            name = re.sub(r'_\d+[ew]_\d+', '', name, flags=re.IGNORECASE)
+            name = re.sub(r'_\d+[ew]', '', name, flags=re.IGNORECASE)
+
+        # Ukloni frekvenciju (brojeve na kraju)
+        name = re.sub(r'_\d+$', '', name)
+
+        # Zameni donje crte razmacima
+        name = name.replace("_", " ").strip()
+
+        # Kapitalizuj reči
+        name = " ".join(w.capitalize() for w in name.split())
+
+        return f"📶 {name}{sat_info}"
+
+    def dabOnlineBuketSelected(self, choice):
+        """Korisnik je izabrao DAB+ buket — pitaj gde da ga sačuva."""
+        if not choice:
+            return
+
+        dl_url, filename = choice[1]
+
+        # Pitaj korisnika šta želi
+        self.session.openWithCallback(
+            lambda answer: self._processDabBuket(answer, dl_url, filename),
+            ChoiceBox,
+            title=f"📶 {choice[0]}",
+            list=[
+                ("▶ Load and play now (temporary)", "play"),
+                ("💾 Save to /etc/enigma2/ (for OpenATV Radio list)", "save"),
+                ("💾 Save + Load now", "save_play"),
+            ]
+        )
+
+    def _processDabBuket(self, choice, dl_url, filename):
+        """Download i obrada DAB+ buketa."""
+        if not choice:
+            return
+
+        action = choice[1]
+        target_path = None
+
+        # Download u cache
+        cache_path = os.path.join(DAB_CACHE_DIR, filename)
+        try:
+            self["nowplaying"].setText(f"📥 Downloading {filename}...")
+
+            # Pošto folder nema razmak, URL je direktno upotrebljiv
+            req = urllib.request.Request(dl_url)
+            req.add_header("User-Agent", f"{PLUGIN_NAME}/{PLUGIN_VERSION}")
+
+            with urllib.request.urlopen(req, timeout=20) as response:
+                with open(cache_path, "wb") as f:
+                    shutil.copyfileobj(response, f)
+
+            # Proveri da je fajl stvarno skinut
+            if not os.path.exists(cache_path) or os.path.getsize(cache_path) < 50:
+                raise Exception("Downloaded file is empty or too small")
+
+            print(f"[CiefpVibes] DAB+ buket skinut: {cache_path} ({os.path.getsize(cache_path)} bytes)")
+
+        except Exception as e:
+            print(f"[CiefpVibes] Download error: {e}")
+            self.session.open(MessageBox, f"❌ Download failed:\n{str(e)[:150]}", MessageBox.TYPE_ERROR)
+            self["nowplaying"].setText("Download failed")
+            return
+
+        # Ako je 'save' ili 'save_play' — kopiraj u /etc/enigma2/
+        if action in ("save", "save_play"):
+            target_path = os.path.join(DAB_BOUQUET_DIR, filename)
+            try:
+                shutil.copy2(cache_path, target_path)
+                print(f"[CiefpVibes] DAB+ buket sačuvan: {target_path}")
+
+                # Dodaj u bouquets.radio (opciono)
+                self._addToRadioBouquets(filename)
+
+                self.session.open(
+                    MessageBox,
+                    f"✅ DAB+ buket sačuvan!\n\n"
+                    f"Fajl: {filename}\n"
+                    f"Lokacija: /etc/enigma2/\n\n"
+                    f"Buket će se pojaviti u OpenATV Radio listi\n"
+                    f"nakon restarta GUI-ja ili odmah u CiefpVibes-u.",
+                    MessageBox.TYPE_INFO,
+                    timeout=5
+                )
+            except Exception as e:
+                print(f"[CiefpVibes] Save error: {e}")
+                self.session.open(MessageBox, f"⚠ Saved to cache only:\n{str(e)[:100]}", MessageBox.TYPE_WARNING)
+
+        # Učitaj buket u playlistu (za 'play' i 'save_play')
+        if action in ("play", "save_play"):
+            stations = self._parseDabBuketFile(cache_path)
+            if stations:
+                self._loadDabStationsToPlaylist(stations, filename)
+            else:
+                self.session.open(MessageBox, "⚠ No stations found in buket!", MessageBox.TYPE_WARNING)
+
+    def _addToRadioBouquets(self, filename):
+        """Dodaje DAB+ buket u bouquets.radio da se pojavi u OpenATV Radio listi."""
+        bouquets_path = "/etc/enigma2/bouquets.radio"
+
+        try:
+            # Proveri da nije već dodat
+            if os.path.exists(bouquets_path):
+                with open(bouquets_path, "r", encoding="utf-8", errors="ignore") as f:
+                    content = f.read()
+                if filename in content:
+                    print(f"[CiefpVibes] {filename} već u bouquets.radio")
+                    return
+
+            # Dodaj unos
+            with open(bouquets_path, "a", encoding="utf-8") as f:
+                f.write(f'#SERVICE 1:7:2:0:0:0:0:0:0:0:FROM BOUQUET "{filename}" ORDER BY bouquet\n')
+                f.write(f'#DESCRIPTION DAB+ {filename}\n')
+
+            print(f"[CiefpVibes] Dodato u bouquets.radio: {filename}")
+
+        except Exception as e:
+            print(f"[CiefpVibes] bouquets.radio error: {e}")
+
+    def _parseDabBuketFile(self, filepath):
+        """Parsira .radio fajl i vraća listu (station_name, service_ref)."""
+        stations = []
+
+        try:
+            with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
+                lines = f.readlines()
+
+            for i, line in enumerate(lines):
+                line = line.strip()
+
+                if line.startswith("#SERVICE 4115:"):
+                    service_line = line[9:].strip()  # ukloni "#SERVICE "
+
+                    # Ime stanice iz DESCRIPTION
+                    station_name = ""
+                    if i + 1 < len(lines) and lines[i + 1].strip().startswith("#DESCRIPTION"):
+                        station_name = lines[i + 1].strip()[13:].strip()
+
+                    # Fallback: iz zadnjeg dela reference
+                    if not station_name:
+                        rest = service_line.split(":", 10)
+                        if len(rest) > 10:
+                            station_name = rest[-1]
+
+                    if station_name:
+                        stations.append((station_name, service_line))
+
+            print(f"[CiefpVibes] Parsed {len(stations)} stations from {filepath}")
+
+        except Exception as e:
+            print(f"[CiefpVibes] Parse error: {e}")
+
+        return stations
+
+    def _loadDabStationsToPlaylist(self, stations, buket_name):
+        """Učitava DAB+ stanice u glavnu playlistu."""
+        if not stations:
+            return
+
+        playlist_with_epg = []
+        for station_name, service_ref in stations:
+            # EPG lookup (opciono)
+            epg_text = ""
+            try:
+                ref = eServiceReference(service_ref)
+                if ref:
+                    epg = eEPGCache.getInstance()
+                    event = epg.lookupEventTime(ref, -1, 0)
+                    if event:
+                        if isinstance(event, tuple) and len(event) >= 5:
+                            epg_text = str(event[2]) if len(event) > 2 else ""
+                        elif hasattr(event, 'getEventName'):
+                            epg_text = event.getEventName() or ""
+                        if len(epg_text) > 30:
+                            epg_text = epg_text[:27] + "..."
+            except:
+                pass
+
+            playlist_with_epg.append((station_name, service_ref, epg_text))
+
+        self.playlist = playlist_with_epg
+        self["playlist"].setList([(sp[0], sp[2] if len(sp) > 2 else "") for sp in self.playlist])
+        self["playlist"].index = 0
+        self.currentIndex = 0
+
+        # Resetuj stanje
+        self.is_dvb_radio = True
+        self.last_rds_text = ""
+        self.current_poster_path = ""
+        self.poster_locked = False
+        self.poster_change_count = 0
+        self.showDefaultPoster()
+        self.is_current_stream_online = True
+
+        # Prikaz
+        self.setSourceLabel("", f"📶 DAB+ {buket_name} ({len(self.playlist)} stations)")
+
+        if self.playlist:
+            first_name = self.playlist[0][0]
+            first_epg = self.playlist[0][2] if len(self.playlist[0]) > 2 else ""
+            if "nowplaying" in self:
+                self["nowplaying"].setText(f"📶 {first_name}")
+            if "current_song" in self and first_epg:
+                self["current_song"].setText(first_epg)
+
+        self.playCurrent()
+
+        print(f"[CiefpVibes] DAB+ buket loaded: {len(self.playlist)} stations")
+
     # === PLAYBACK ===
     def playCurrent(self):
         if not self.playlist or not (0 <= self.currentIndex < len(self.playlist)):
             return
+        # Resetuj pikon na default za novu pesmu/stanicu
+        self.showDefaultPicon()
 
-        name, url = self.playlist[self.currentIndex]
+        # Playlist može imati 2 elementa (name, url) ili 3 za satelitski radio
+        # (name, service_ref, epg). U oba slučaja uzimamo samo prva dva.
+        current_item = self.playlist[self.currentIndex]
+        name = current_item[0]
+        url = current_item[1]
 
         # === OBRADA FTP URL-ova ===
         if url.startswith('ftp://'):
@@ -2709,17 +3142,27 @@ class CiefpVibesMain(Screen):
         self.poster_change_count = 0
         self.folderCoverCache = {}
 
-        name, url = self.playlist[self.currentIndex]
+        # Playlist može imati 2 elementa (name, url) ili 3 za satelitski radio
+        # (name, service_ref, epg). U oba slučaja uzimamo samo prva dva.
+        current_item = self.playlist[self.currentIndex]
+        name = current_item[0]
+        url = current_item[1]
 
         # Da li je satelitski radio? (format 1:0:2:... ili 1:0:A:...)
         is_satellite_radio = False
         if isinstance(url, str):
             parts = url.split(':')
-            if len(parts) >= 4 and parts[0] == '1' and parts[1] == '0':
-                service_type = parts[2].upper()
-                if service_type == '2' or service_type == 'A' or service_type == '10':
+            if len(parts) >= 4:
+                reftype = parts[0]
+                # DAB+ — bilo koji service type (1, 2, A, 10)
+                if reftype == '4115':
                     is_satellite_radio = True
-
+                    print(f"[CiefpVibes] DAB+ detected (reftype=4115, stype={parts[2]})")
+                # DVB radio
+                elif reftype == '1' and parts[1] == '0':
+                    service_type = parts[2].upper() if len(parts) > 2 else ''
+                    if service_type in ('2', 'A', '10'):
+                        is_satellite_radio = True
         # Da li je lokalni fajl?
         is_local_file = url.startswith('/') or url.startswith('file://')
         # Da li je online stream?
@@ -2847,6 +3290,9 @@ class CiefpVibesMain(Screen):
         # === OBRADA ONLINE STREAMOVA ===
         elif is_online_stream:
             self["nowplaying"].setText(f"▶ {name}")
+            # Za online stream - pokušaj po imenu stanice
+            if is_online_stream:
+                self.updatePicon("", name)  # name je ime stanice iz playliste
             self.current_song_info = {"artist": "", "title": ""}
             self.showDefaultPoster()
 
@@ -2859,6 +3305,7 @@ class CiefpVibesMain(Screen):
                 self.updatePosterFromMetadata(force_update=True)
 
             self.is_current_stream_online = True
+
         # === OBRADA SATELITSKOG RADIJA ===
         elif is_satellite_radio:
             print(f"[CiefpVibes] Satellite radio detected: {url}")
@@ -2868,6 +3315,8 @@ class CiefpVibesMain(Screen):
             self.poster_locked = False
             self.poster_change_count = 0
             self.showDefaultPoster()
+            # Prikaži pikon za ovu stanicu
+            self.updatePicon(url, name)
 
             # Resetuj RDS
             self.last_rds_text = ""  # <-- DODAJ OVO
@@ -3065,33 +3514,32 @@ class CiefpVibesMain(Screen):
                 # KORISTI SAČUVANI RDS (iz updateEPG)
                 rds_text = self.last_rds_text if hasattr(self, 'last_rds_text') else ""
 
-                # Formiraj prikaz
+                # Formiraj razdvojeni prikaz u DVA REDA za Satelitski Radio
                 if self.playlist and 0 <= self.currentIndex < len(self.playlist):
-                    name = self.playlist[self.currentIndex][0]
-                    display = f"📻 {name}"
+                    station_name = self.playlist[self.currentIndex][0]
+                    if " • " in station_name:
+                        station_name = station_name.split(" • ")[0]
 
+                    line1 = f"📻 {station_name}"
+
+                    line2_parts = []
                     if epg_title:
-                        display += f" • {epg_title}"
-
+                        line2_parts.append(epg_title)
                     if rds_text:
-                        if len(rds_text) > 50:
-                            rds_short = rds_text[:48] + "..."
-                        else:
-                            rds_short = rds_text
-                        display += f" • {rds_short}"
+                        line2_parts.append(rds_text)
 
-                    self["nowplaying"].setText(display)
+                    line2 = " • ".join(line2_parts) if line2_parts else "Nema dodatnih informacija"
+
+                    self["nowplaying"].setText(line1)
+                    self["current_song"].setText(line2)
 
                     if epg_title and epg_title != self.last_displayed_title:
                         self.last_displayed_title = epg_title
-                        print(f"[CiefpVibes] EPG: {epg_title}")
+                        print(f"[CiefpVibes] Sat EPG: {epg_title}")
                 else:
-                    display = "📻"
-                    if epg_title:
-                        display += f" {epg_title}"
-                    if rds_text:
-                        display += f" • {rds_text[:30]}"
-                    self["nowplaying"].setText(display)
+                    self["nowplaying"].setText("📻 Satelitski Radio")
+                    if "current_song" in self:
+                        self["current_song"].setText(epg_title if epg_title else "Odaberite stanicu")
 
                 # Progress bar
                 seek = service.seek()
@@ -3106,7 +3554,6 @@ class CiefpVibesMain(Screen):
                             self["progress_real"].setValue(percentage)
                 return
 
-
             # === OSTATAK KODA ZA HTTP STREAMOVE ===
             raw_title = info.getInfoString(iServiceInformation.sTagTitle).strip()
             artist_tag = info.getInfoString(iServiceInformation.sTagArtist)
@@ -3117,27 +3564,22 @@ class CiefpVibesMain(Screen):
                 print(f"[CiefpVibes] Infobar title changed: {raw_title[:50]}")
                 self.last_displayed_title = raw_title
 
-                # Za online radio, odmah parsiraj i ažuriraj
                 if self.is_current_stream_online:
+                    # Sačuvaj parsirane podatke za poster, ali za Infobar
+                    # drugi red koristi originalni raw title sa streama.
                     artist, title = self.parseArtistTitle(raw_title)
                     if artist or title:
-                        # Ažuriraj trenutne podatke
                         self.current_song_info["artist"] = artist
                         self.current_song_info["title"] = title
-
-                        # Ažuriraj prikaz naziva
+                        if "current_song" in self:
+                            self["current_song"].setText(raw_title)
                         self.updateNowPlayingText()
+                        if "current_song" in self:
+                            self["current_song"].setText(raw_title)
 
-                        # Zaustavi prethodni timer za poster
                         self.poster_search_timer.stop()
-
-                        # Postavi novi timer za poster (8 sekundi)
                         self.poster_search_timer.start(8000, True)
-
-                        # Prikaži default poster odmah
                         self.showDefaultPoster()
-
-                        print(f"[CiefpVibes] Updated from infobar: {artist} - {title}")
 
             artist = ""
             title = ""
@@ -3152,16 +3594,13 @@ class CiefpVibesMain(Screen):
                         self.current_song_info["artist"] = artist
                         self.current_song_info["title"] = title
                         new_metadata = True
-                        print(f"[CiefpVibes] New metadata from ICY: {artist} - {title}")
 
             elif artist_tag and artist_tag.strip():
                 if artist_tag.strip() != self.current_song_info["artist"]:
                     self.current_song_info["artist"] = artist_tag.strip()
                     new_metadata = True
-                    print(f"[CiefpVibes] New metadata from tag: Artist={artist_tag}")
 
             elif title_tag and title_tag.strip():
-                # Neki streamovi stavljaju artist • title u title tag
                 if " • " in title_tag:
                     parts = title_tag.split(" • ", 1)
                     if len(parts) > 1:
@@ -3171,9 +3610,8 @@ class CiefpVibesMain(Screen):
                                 self.current_song_info["artist"] = a
                                 self.current_song_info["title"] = t
                                 new_metadata = True
-                                print(f"[CiefpVibes] New metadata from title tag: {a} - {t}")
 
-            # === NOVO: Fallback ako nemamo artist, ali imamo title ===
+            # Fallback iz playliste
             if not self.current_song_info["artist"] and self.current_song_info["title"]:
                 if self.playlist and 0 <= self.currentIndex < len(self.playlist):
                     name = self.playlist[self.currentIndex][0]
@@ -3183,35 +3621,21 @@ class CiefpVibesMain(Screen):
                         if fallback_title:
                             self.current_song_info["title"] = fallback_title
                         new_metadata = True
-                        print(
-                            f"[CiefpVibes] Fallback metadata from playlist name: {fallback_artist} - {self.current_song_info['title']}")
 
             # ===== 2. OBRADA NOVIH METAPODATAKA =====
             if new_metadata:
                 self.updateNowPlayingText()
 
-                # POSEBNA LOGIKA ZA ONLINE RADIO
                 if self.is_current_stream_online:
-                    print(f"[CiefpVibes] Online radio - new metadata detected")
-
-                    # Zaustavi prethodni timer (ako postoji)
                     self.poster_search_timer.stop()
-
-                    # Postavi timer za 8 sekundi (kraće čekanje)
                     self.poster_search_timer.start(8000, True)
-
-                    # Za sada prikaži default poster
                     self.showDefaultPoster()
 
-                    # ===== NOVO: POKRENI AUTOMATSKO AŽURIRANJE =====
                     if not hasattr(self, 'auto_title_update_timer') or not self.auto_title_update_timer.isActive():
-                        # Kreiraj timer ako ne postoji
                         self.auto_title_update_timer = eTimer()
                         self.auto_title_update_timer.callback.append(self.autoUpdateTitle)
-                        self.auto_title_update_timer.start(5000, False)  # 5 sekundi
-
+                        self.auto_title_update_timer.start(5000, False)
                 else:
-                    # Za lokalne fajlove - stara logika
                     self.updatePosterFromMetadata(force_update=True)
 
         # ===== 3. PROGRESS BAR UPDATE =====
@@ -3253,6 +3677,8 @@ class CiefpVibesMain(Screen):
                                 self.current_song_info["artist"] = artist
                                 self.current_song_info["title"] = title
                                 self.updateNowPlayingText()
+                                if "current_song" in self:
+                                    self["current_song"].setText(raw_title)
 
                                 # Resetuj poster kontrolu
                                 self.poster_locked = False
@@ -3269,23 +3695,35 @@ class CiefpVibesMain(Screen):
             self.auto_title_update_timer.start(5000, False)
 
     def updateNowPlayingText(self):
-        # Za online radio, resetuj timer kada se promeni prikaz
+        # Za online radio:
+        # 1. red = naziv stanice iz playliste
+        # 2. red = trenutni title/metapodatak sa streama
         if self.is_current_stream_online:
             self.last_title_change_time = time.time()
+
         if not self.playlist or self.currentIndex < 0:
             return
 
         name = self.playlist[self.currentIndex][0] if self.playlist else "Radio"
-        display = f"▶ {name}"
-        artist = self.current_song_info["artist"]
-        title = self.current_song_info["title"]
+
+        # Prvi red ostaje čist naziv stanice iz playliste.
+        self["nowplaying"].setText(f"▶ {name}")
+
+        # Drugi red prikazuje trenutno očitan stream metadata.
+        artist = self.current_song_info.get("artist", "")
+        title = self.current_song_info.get("title", "")
 
         if artist and title:
-            display += f" • {artist} - {title}"
+            line2 = f"{artist} - {title}"
         elif title:
-            display += f" • {title}"
+            line2 = title
+        elif artist:
+            line2 = artist
+        else:
+            line2 = ""
 
-        self["nowplaying"].setText(display)
+        if "current_song" in self:
+            self["current_song"].setText(line2)
 
     def updatePosterFromMetadata(self, force_update=False):
         print(f"[CiefpVibes-DEBUG] updatePosterFromMetadata called, force_update={force_update}")
@@ -4368,22 +4806,32 @@ class CiefpVibesMain(Screen):
 
     # === ONLINE FILES ===
     def openGitHubLists(self):
-        # Provjera da li je OpenDirectory Downloader dostupan
         opendir_label = "📥 OpenDirectory Downloader" if OPENDIR_DOWNLOADER_AVAILABLE else "📥 OpenDirectory (not available)"
         opendir_value = "OPENDIR_DOWNLOADER" if OPENDIR_DOWNLOADER_AVAILABLE else "OPENDIR_UNAVAILABLE"
+
+        # Proveri DAB+ dostupnost
+        dab_available = DAB_RADIO_AVAILABLE and is_dab_available()
+
+        menu_items = [
+            ("🎶 M3U ARTIST Playlists", "M3U ARTIST"),
+            ("🎶 M3U MIX Playlists", "M3U MIX"),
+            ("📺 .tv Bouquets", "TV"),
+            ("📻 Radio Lists", "RADIO"),
+        ]
+
+        if dab_available:
+            menu_items.append(("📶 DAB+ Online Bukets", "DAB_ONLINE"))
+
+        menu_items.extend([
+            ("🌐 OpenDirectory Browser", "OPENDIR"),
+            (opendir_label, opendir_value),
+        ])
 
         self.session.openWithCallback(
             self.githubCategorySelected,
             ChoiceBox,
             title="📥 Online Files",
-            list=[
-                ("🎶 M3U ARTIST Playlists", "M3U ARTIST"),
-                ("🎶 M3U MIX Playlists", "M3U MIX"),
-                ("📺 .tv Bouquets", "TV"),
-                ("📻 Radio Lists", "RADIO"),
-                ("🌐 OpenDirectory Browser", "OPENDIR"),
-                (opendir_label, opendir_value),
-            ]
+            list=menu_items
         )
 
     def githubCategorySelected(self, choice):
@@ -4391,28 +4839,30 @@ class CiefpVibesMain(Screen):
             return
         cat = choice[1]
 
+        # Specijalne kategorije koje ne koriste fetchGitHubLists
         if cat == "OPENDIR_UNAVAILABLE":
-            self.session.open(MessageBox,
-                              "OpenDirectory Downloader module not found!\n"
-                              "Please install opendirdownloader.py in plugin folder.",
-                              MessageBox.TYPE_ERROR)
+            self.session.open(MessageBox, "OpenDirectory Downloader module not found!", MessageBox.TYPE_ERROR)
             return
-
-        if cat == "M3U ARTIST":
-            url = GITHUB_M3U_ARTIST_URL
-        elif cat == "M3U MIX":
-            url = GITHUB_M3U_MIX_URL
-        elif cat == "TV":
-            url = GITHUB_TV_URL
-        elif cat == "RADIO":
-            url = GITHUB_RADIO_URL
-        elif cat == "OPENDIR":
+        if cat == "DAB_ONLINE":
+            self.openDABOnlineBukets()
+            return
+        if cat == "OPENDIR":
             self.openOpenDirectory()
             return
-        elif cat == "OPENDIR_DOWNLOADER":
+        if cat == "OPENDIR_DOWNLOADER":
             self.openOpenDirDownloader()
             return
-        else:
+
+        # Standardne GitHub liste
+        url_map = {
+            "M3U ARTIST": GITHUB_M3U_ARTIST_URL,
+            "M3U MIX": GITHUB_M3U_MIX_URL,
+            "TV": GITHUB_TV_URL,
+            "RADIO": GITHUB_RADIO_URL,
+        }
+
+        url = url_map.get(cat)
+        if not url:
             return
 
         items = self.fetchGitHubLists(url, cat)
