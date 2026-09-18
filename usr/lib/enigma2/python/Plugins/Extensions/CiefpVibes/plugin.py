@@ -37,14 +37,21 @@ except ImportError:
     print("[CiefpVibes] OpenDirDownloader not available")
 # Satellite Radio Lamedb Modul
 try:
-    from .CiefpSatelliteRadio import CiefpSatelliteRadioScreen, CiefpDABRadioScreen, is_dab_available
+    from .CiefpSatelliteRadio import (
+        CiefpSatelliteRadioScreen,
+        CiefpDABRadioScreen,
+        is_dab_available,
+        get_satellite_name_from_service_ref  # <-- DODATO
+    )
     SAT_RADIO_AVAILABLE = True
     DAB_RADIO_AVAILABLE = True
     print("[CiefpVibes] CiefpSatelliteRadio + DAB loaded!")
 except ImportError as e:
     SAT_RADIO_AVAILABLE = False
     DAB_RADIO_AVAILABLE = False
+    get_satellite_name_from_service_ref = lambda x: ""  # fallback
     print(f"[CiefpVibes] CiefpSatelliteRadio import error: {e}")
+
 # Na vrhu fajla, posle import-ova:
 try:
     from enigma import iServiceInformation
@@ -418,7 +425,7 @@ config.plugins.ciefpTmpCache.auto_clear = ConfigSelection(default="500", choices
 
 PLUGIN_NAME = "CiefpVibes"
 PLUGIN_DESC = "Jukebox play music locally and online"
-PLUGIN_VERSION = "2.6"
+PLUGIN_VERSION = "2.7"
 PLUGIN_DIR = os.path.dirname(__file__) or "/usr/lib/enigma2/python/Plugins/Extensions/CiefpVibes"
 CACHE_DIR = "/tmp/ciefpvibes_cache"
 os.makedirs(CACHE_DIR, exist_ok=True)
@@ -538,6 +545,10 @@ class CiefpVibesMain(Screen):
             <widget name="signal_agc_value" position="1250,970" size="100,30"
                     font="Bold;22" foregroundColor="#00ff00"
                     transparent="1" zPosition="4"/>
+             <!-- NOVI LABEL ZA IME SATELITA -->
+            <widget name="satellite_name_label" position="1200,970" size="400,30"
+                    font="Bold;24" foregroundColor="#00ff00"
+                    transparent="1" zPosition="4" halign="right"/>        
 
             <!-- DONJI RED SA TASTERIMA -->
             <widget name="key_red"    position="60,1030"  size="260,50" font="Regular;32" foregroundColor="#ff5555" transparent="1" zPosition="3"/>
@@ -629,6 +640,8 @@ class CiefpVibesMain(Screen):
         self["signal_agc_bar"] = ProgressBar()
         self["signal_agc_value"] = Label("")
         self["signal_db"] = Label("")
+        self["satellite_name_label"] = Label("")  # <-- DODATO
+        self.current_satellite_name = ""          # <-- DODATO
         self["source_label"] = Label("")
         self["picon"] = Pixmap()
         self["key_red"] = Label("EXIT")
@@ -722,7 +735,6 @@ class CiefpVibesMain(Screen):
             self["time"].setText(t)
         except:
             pass
-
     def updateSignalInfo(self):
         """Ažurira prikaz signala na infobaru (SNR, AGC, DB) - samo za satelitski i DAB+ radio."""
         try:
@@ -736,6 +748,7 @@ class CiefpVibesMain(Screen):
                     self["signal_agc_bar"].setValue(0)
                     self["signal_agc_value"].setText("")
                     self["signal_db"].setText("")
+                    self["satellite_name_label"].setText("") # <-- DODATO
                 return
 
             signal = get_signal_info()
@@ -748,6 +761,7 @@ class CiefpVibesMain(Screen):
                     self["signal_agc_bar"].setValue(0)
                     self["signal_agc_value"].setText("--")
                     self["signal_db"].setText("DB --")
+                    self["satellite_name_label"].setText(self.current_satellite_name) # <-- DODATO
                 return
 
             snr = signal.get("snr", 0)
@@ -765,6 +779,8 @@ class CiefpVibesMain(Screen):
                 self["signal_agc_value"].setText(f"{agc}%")
 
                 self["signal_db"].setText(f"DB:{db:.2f}")
+                # Prikaži ime satelita ako postoji
+                self["satellite_name_label"].setText(self.current_satellite_name) # <-- DODATO
 
         except Exception as e:
             print(f"[CiefpVibes] updateSignalInfo error: {e}")
@@ -3413,6 +3429,7 @@ class CiefpVibesMain(Screen):
                 # Fajl ne postoji
                 self["nowplaying"].setText(f"▶ {name}")
                 self.showDefaultPoster()
+                self.current_satellite_name = ""  # Resetuj ime satelita
 
         # === OBRADA ONLINE STREAMOVA ===
         elif is_online_stream:
@@ -3432,6 +3449,7 @@ class CiefpVibesMain(Screen):
                 self.updatePosterFromMetadata(force_update=True)
 
             self.is_current_stream_online = True
+            self.current_satellite_name = ""  # Resetuj ime satelita
 
         # === OBRADA SATELITSKOG RADIJA ===
         elif is_satellite_radio:
@@ -3446,13 +3464,23 @@ class CiefpVibesMain(Screen):
             self.updatePicon(url, name)
 
             # Resetuj RDS
-            self.last_rds_text = ""  # <-- DODAJ OVO
+            self.last_rds_text = ""
 
             # Postavi naziv
             self["nowplaying"].setText(f"📻 {name}")
             self.is_current_stream_online = True
             self.is_dvb_radio = True
             self.current_dvb_service_ref = url
+            # === DODATO: Izvuci ime satelita iz service reference ===
+            try:
+                self.current_satellite_name = get_satellite_name_from_service_ref(url)
+                if self.current_satellite_name:
+                    print(f"[CiefpVibes] Satellite name set to: {self.current_satellite_name}")
+                else:
+                    self.current_satellite_name = ""
+            except Exception as e:
+                print(f"[CiefpVibes] Error getting satellite name: {e}")
+                self.current_satellite_name = ""
 
             # === ODMAH POKUŠAJ DA DOHVATIŠ EPG I RDS ===
             try:

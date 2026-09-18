@@ -8,17 +8,14 @@ from Components.Sources.List import List
 from Screens.MessageBox import MessageBox
 from enigma import gFont, RT_HALIGN_LEFT, RT_VALIGN_CENTER, eTimer
 
-# === MAPIRANJE NAMESPACE -> SATELITSKA POZICIJA ===
+# === MAPIRANJE NAMESPACE -> (SATELITSKA POZICIJA, IME SATELITA) ===
 SAT_POSITION_MAP = {}
+
 
 def load_satellite_positions():
     """
     Učitava satelitske pozicije iz /etc/enigma2/satellites.xml
-    i gradi mapu namespace -> pozicija
-    
-    PREMA UPUTSTVU:
-    - Za Istočne (E): position * 10 u hex
-    - Za Zapadne (W): 3600 - (position * 10) u hex
+    i gradi mapu namespace -> (pozicija, ime)
     """
     global SAT_POSITION_MAP
     sat_xml_path = "/etc/enigma2/satellites.xml"
@@ -31,21 +28,20 @@ def load_satellite_positions():
     try:
         with open(sat_xml_path, "r", encoding="utf-8", errors="ignore") as f:
             content = f.read()
-        
-        # Izvuci sve satelite sa pozicijama
+
+        # Izvuci sve satelite sa pozicijama i imenima
         sat_pattern = r'<sat\s+name="([^"]*)"\s+flags="\d+"\s+position="([-]?\d+)"'
         satellites = re.findall(sat_pattern, content)
-        
+
         print(f"[CiefpSatelliteRadio] Loaded {len(satellites)} satellites from XML")
-        
-        # Kreiraj mapu namespace -> pozicija
+
         known_namespace_map = {}
-        
+
         for sat_name, position in satellites:
             pos_int = int(position)
-            
+            sat_name = sat_name.strip()  # Očisti ime
+
             if pos_int >= 0:  # Istočni satelit
-                # Formula: position * 10 u hex
                 pos_value = pos_int
                 ns_hex = f"{pos_value:04X}".upper()
                 deg = pos_value / 10.0
@@ -53,9 +49,8 @@ def load_satellite_positions():
                     pos_str = f"{deg:.0f}°E"
                 else:
                     pos_str = f"{deg:.1f}°E"
-                known_namespace_map[ns_hex] = pos_str
+                known_namespace_map[ns_hex] = (pos_str, sat_name)
             else:  # Zapadni satelit
-                # Formula: 3600 - (abs(position) * 10) u hex
                 pos_abs = abs(pos_int)
                 pos_value = 3600 - pos_abs
                 ns_hex = f"{pos_value:04X}".upper()
@@ -64,18 +59,15 @@ def load_satellite_positions():
                     pos_str = f"{deg:.0f}°W"
                 else:
                     pos_str = f"{deg:.1f}°W"
-                known_namespace_map[ns_hex] = pos_str
-        
+                known_namespace_map[ns_hex] = (pos_str, sat_name)
+
         SAT_POSITION_MAP = known_namespace_map
         print(f"[CiefpSatelliteRadio] Built position map with {len(SAT_POSITION_MAP)} entries")
-        
-        # Debug: ispiši neke primere
-        for ns, pos in list(SAT_POSITION_MAP.items())[:10]:
-            print(f"  {ns} -> {pos}")
-        
+
     except Exception as e:
         print(f"[CiefpSatelliteRadio] Error loading satellites.xml: {e}")
         SAT_POSITION_MAP = {}
+
 
 # Učitaj satelitske pozicije pri startu
 load_satellite_positions()
@@ -83,55 +75,73 @@ load_satellite_positions()
 
 def get_satellite_position_from_namespace(namespace):
     """
-    Dohvata satelitsku poziciju iz mape namespace -> pozicija
+    Dohvata satelitsku poziciju i ime iz mape namespace -> (pozicija, ime)
+    Vraća tuple: (pozicija_string, ime_satelita)
     """
     global SAT_POSITION_MAP
     if not namespace:
-        return "Ostali Sateliti"
+        return "Ostali Sateliti", "Nepoznat"
 
-    # Uzmi prva 4 karaktera (prva 2 bajta) kao ključ
     ns_key = namespace[:4].upper()
 
     # SPECIJALNI SLUČAJEVI ZA DVB-T I DVB-C
     if ns_key.startswith("EEEE"):
-        return "DVB-T/T2"
+        return "DVB-T/T2", "DVB-T/T2"
     if ns_key.startswith("FFFF"):
-        return "DVB-C"
+        return "DVB-C", "DVB-C"
 
-    # Pokušaj direktno mapiranje
     if ns_key in SAT_POSITION_MAP:
         return SAT_POSITION_MAP[ns_key]
 
-    # Pokušaj sa heks konverzijom
+    # Fallback ako nema u mapi
     try:
         ns_val = int(ns_key, 16)
-
-        if ns_val < 0x708:  # Istočni satelit (< 1800 dec)
+        if ns_val < 0x708:  # Istočni
             deg = ns_val / 10.0
             if deg > 180:
                 deg = 360 - deg
-            return f"{deg:.1f}°E".replace(".0°E", "°E")
-        else:  # Zapadni satelit (> 1800 dec)
+            return f"{deg:.1f}°E", f"Satelit {deg:.1f}°E"
+        else:  # Zapadni
             deg = (3600 - ns_val) / 10.0
-            return f"{deg:.1f}°W".replace(".0°W", "°W")
+            return f"{deg:.1f}°W", f"Satelit {deg:.1f}°W"
     except:
         pass
 
-    return "Ostali Sateliti"
+    return "Ostali Sateliti", "Nepoznat"
+
+def get_satellite_name_from_service_ref(service_ref):
+    """
+    Pomoćna funkcija koja iz service reference izvlači ime satelita.
+    Koristi se u plugin.py.
+    """
+    if not service_ref or not isinstance(service_ref, str):
+        return ""
+    try:
+        parts = service_ref.split(':')
+        print(f"[CiefpSatelliteRadio-DEBUG] Parsing service_ref: {service_ref}, parts: {len(parts)}")
+        if len(parts) >= 7:
+            namespace = parts[6].upper().zfill(8)
+            print(f"[CiefpSatelliteRadio-DEBUG] Namespace: {namespace}")
+            _, sat_name = get_satellite_position_from_namespace(namespace)
+            print(f"[CiefpSatelliteRadio-DEBUG] Satellite name: {sat_name}")
+            return sat_name
+    except Exception as e:
+        print(f"[CiefpSatelliteRadio-DEBUG] Error: {e}")
+    return ""
 
 def get_satellite_radio_from_lamedb():
     """
     Čita radio kanale iz /etc/enigma2/lamedb
-    
+
     PREMA UPUTSTVU, format servisa je:
     sid:namespace:tid:nid:service_type:source_id
-    
+
     TYPE=2 označava radio.
     """
     lamedb_path = "/etc/enigma2/lamedb"
     satellites = {}
     stations_count = 0
-    
+
     if not os.path.exists(lamedb_path):
         print("[CiefpSatelliteRadio] lamedb ne postoji: ", lamedb_path)
         return satellites
@@ -169,16 +179,17 @@ def get_satellite_radio_from_lamedb():
                 continue
 
             # Odredi satelit iz namespace-a
-            sat_pos = get_satellite_position_from_namespace(namespace)
-            
+            sat_pos, sat_name = get_satellite_position_from_namespace(namespace)
+            sat_key = (sat_pos, sat_name)  # Ključ je tuple
+
             # Enigma2 service reference za radio
             service_ref = "1:0:2:%s:%s:%s:%s:0:0:0:" % (sid, tid, nid, namespace)
-            
-            if sat_pos not in satellites:
-                satellites[sat_pos] = []
-                
-            if not any(x[1] == service_ref for x in satellites[sat_pos]):
-                satellites[sat_pos].append((station_name, service_ref))
+
+            if sat_key not in satellites:
+                satellites[sat_key] = []
+
+            if not any(x[1] == service_ref for x in satellites[sat_key]):
+                satellites[sat_key].append((station_name, service_ref))
                 stations_count += 1
                 print("[CiefpSatelliteRadio] %s -> %s (%s)" % (station_name, service_ref, sat_pos))
 
@@ -190,7 +201,6 @@ def get_satellite_radio_from_lamedb():
         traceback.print_exc()
 
     return satellites
-
 
 def get_dab_radio_from_bouquets():
     """
@@ -378,32 +388,38 @@ class CiefpSatelliteRadioScreen(Screen):
     def parseAndLoad(self):
         """Pokreće parser i osvežava listu na ekranu"""
         self.sat_data = get_satellite_radio_from_lamedb()
-        
+
         if not self.sat_data:
             self.error_timer.start(100, True)
             return
 
         self["title_label"].setText("Select a satellite to view radio stations:")
-        
+
         # Sortiranje satelita: prvo istočni (E), pa zapadni (W)
         def sort_key(sat_name):
+            # sat_name je sada tuple (pozicija, ime)
+            pos_str = sat_name[0]
             try:
-                if '°E' in sat_name:
-                    val = float(sat_name.replace('°E', '').strip())
+                if '°E' in pos_str:
+                    val = float(pos_str.replace('°E', '').strip())
                     return (0, val)
-                elif '°W' in sat_name:
-                    val = float(sat_name.replace('°W', '').strip())
+                elif '°W' in pos_str:
+                    val = float(pos_str.replace('°W', '').strip())
                     return (1, val)
                 else:
                     return (2, 0)
             except:
                 return (3, 0)
-        
+
         self.ui_list = []
-        for sat in sorted(self.sat_data.keys(), key=sort_key):
-            count = len(self.sat_data[sat])
-            self.ui_list.append((f"📡 Satellite {sat} ({count} radio stations)", sat))
-            
+        # sat_data je dict gde je ključ tuple (pozicija, ime), a vrednost lista stanica
+        for sat_key in sorted(self.sat_data.keys(), key=sort_key):
+            pos_str, sat_name = sat_key
+            count = len(self.sat_data[sat_key])
+            # Prikazujemo ime satelita i poziciju
+            display_text = f"📡 {sat_name} ({pos_str}) - {count} radio stations"
+            self.ui_list.append((display_text, sat_key))
+
         self["sat_list"].setList(self.ui_list)
 
     def showErrorAndClose(self):
@@ -418,10 +434,10 @@ class CiefpSatelliteRadioScreen(Screen):
         current = self["sat_list"].getCurrent()
         if not current:
             return
-            
-        sat_key = current[1]
+
+        sat_key = current[1]  # Ovo je tuple (pozicija, ime)
         stations_list = self.sat_data[sat_key]
-        
+
         self.close(stations_list)
 
     def closeError(self, answer=None):
