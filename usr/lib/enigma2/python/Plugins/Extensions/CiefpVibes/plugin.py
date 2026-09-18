@@ -250,6 +250,7 @@ def get_current_rds_text():
         print(f"[CiefpVibes] RDS error: {e}")
 
     return None
+
 def get_current_rds_info():
     """
     Dohvata sve RDS informacije sa trenutnog servisa
@@ -353,6 +354,57 @@ def get_rds_from_enigma2():
         print(f"[CiefpVibes] get_rds_from_enigma2 error: {e}")
 
     return None
+def get_signal_info():
+    """
+    Čita signal info iz frontend-a (isto kao CiefpSignalInfo plugin).
+    Vraća dict: {"snr": int, "agc": int, "ber": int, "db": float}
+    """
+    try:
+        from Screens.InfoBar import InfoBar
+
+        if not InfoBar.instance:
+            return None
+
+        service = InfoBar.instance.session.nav.getCurrentService()
+        if not service:
+            return None
+
+        frontendInfo = service.frontendInfo()
+        if not frontendInfo:
+            return None
+
+        fd = frontendInfo.getAll(True)
+        if not fd:
+            return None
+
+        # Signal kvalitet (0-65535)
+        quality = fd.get("tuner_signal_quality", 0)
+        snr_percent = min(100, quality // 655)
+
+        # DB vrednost
+        snr_db = fd.get("tuner_signal_quality_db", 0) / 100.0
+
+        # BER
+        ber = fd.get("tuner_bit_error_rate", 0)
+
+        # AGC / Signal power (0-65535)
+        power = fd.get("tuner_signal_power", 0)
+        agc_percent = min(100, power // 655)
+
+        # Ako DB nije dostupan, aproksimiraj iz SNR-a
+        if snr_db <= 0.0 and snr_percent > 0:
+            snr_db = (snr_percent / 100.0) * 20.0
+
+        return {
+            "snr": snr_percent,
+            "agc": agc_percent,
+            "ber": ber,
+            "db": snr_db,
+        }
+    except Exception as e:
+        print(f"[CiefpVibes] get_signal_info error: {e}")
+        return None
+    
 # TMP cache config
 config.plugins.ciefpTmpCache = ConfigSubsection()
 config.plugins.ciefpTmpCache.auto_clear = ConfigSelection(default="500", choices=[
@@ -366,7 +418,7 @@ config.plugins.ciefpTmpCache.auto_clear = ConfigSelection(default="500", choices
 
 PLUGIN_NAME = "CiefpVibes"
 PLUGIN_DESC = "Jukebox play music locally and online"
-PLUGIN_VERSION = "2.5"
+PLUGIN_VERSION = "2.6"
 PLUGIN_DIR = os.path.dirname(__file__) or "/usr/lib/enigma2/python/Plugins/Extensions/CiefpVibes"
 CACHE_DIR = "/tmp/ciefpvibes_cache"
 os.makedirs(CACHE_DIR, exist_ok=True)
@@ -420,8 +472,8 @@ os.makedirs(DAB_CACHE_DIR, exist_ok=True)
 
 class CiefpVibesMain(Screen):
     def buildSkin(self):
-        bg = getattr(self, "current_bg", "background1.png")
-        ib = getattr(self, "current_ib", "infobar5.png")
+        bg = getattr(self, "current_bg", "background7.png")
+        ib = getattr(self, "current_ib", "infobar4.png")
 
         return '''<?xml version="1.0" encoding="utf-8"?>
         <screen position="center,center" size="1920,1080" flags="wfNoBorder" backgroundColor="transparent">
@@ -465,6 +517,27 @@ class CiefpVibesMain(Screen):
 
             <!-- STATUS OFFLINE -->
             <widget name="offline_status" position="260,950" size="1200,15" font="Regular;18" foregroundColor="#ff3333" halign="center" valign="center" transparent="0" backgroundColor="#000000" zPosition="4"/>
+            
+            <!-- SIGNAL INFO - treći red (SNR, AGC, DB) sa mini progress bar-ima -->
+            <widget name="signal_snr_label" position="260,970" size="50,30"
+                    font="Bold;22" foregroundColor="#00ff00"
+                    transparent="1" zPosition="4" text="SNR"/>
+            <widget name="signal_snr_bar" position="330,975" size="300,10"
+                    pixmap="%s/progress_mini.png"
+                    borderWidth="1" borderColor="#000000" zPosition="4"/>
+            <widget name="signal_snr_value" position="660,970" size="100,30"
+                    font="Bold;22" foregroundColor="#00ff00"
+                    transparent="1" zPosition="4"/>
+
+            <widget name="signal_agc_label" position="830,970" size="50,30"
+                    font="Bold;22" foregroundColor="#00ff00"
+                    transparent="1" zPosition="4" text="AGC"/>
+            <widget name="signal_agc_bar" position="910,975" size="300,10"
+                    pixmap="%s/progress_mini.png"
+                    borderWidth="1" borderColor="#000000" zPosition="4"/>
+            <widget name="signal_agc_value" position="1250,970" size="100,30"
+                    font="Bold;22" foregroundColor="#00ff00"
+                    transparent="1" zPosition="4"/>
 
             <!-- DONJI RED SA TASTERIMA -->
             <widget name="key_red"    position="60,1030"  size="260,50" font="Regular;32" foregroundColor="#ff5555" transparent="1" zPosition="3"/>
@@ -473,7 +546,7 @@ class CiefpVibesMain(Screen):
             <widget name="key_blue"   position="930,1030" size="260,50" font="Regular;32" foregroundColor="#5599ff" transparent="1" zPosition="3"/>
             <widget name="key_menu"   position="1200,1030" size="300,50" font="Regular;32" foregroundColor="#ffffff" transparent="1" zPosition="3"/>
             <widget name="update_status" position="1250,1030" size="400,40" font="Regular;28" foregroundColor="#ffffff" halign="right" transparent="1" zPosition="3"/>
-        </screen>''' % (PLUGIN_DIR, bg, PLUGIN_DIR, ib, PLUGIN_DIR)
+        </screen>''' % (PLUGIN_DIR, bg, PLUGIN_DIR, ib, PLUGIN_DIR, PLUGIN_DIR, PLUGIN_DIR)
 
     def __init__(self, session):
         self["poster"] = Pixmap()
@@ -549,6 +622,13 @@ class CiefpVibesMain(Screen):
         self["playlist"] = List([])
         self["nowplaying"] = Label("🌀 Loading...")
         self["current_song"] = Label("")
+        self["signal_snr_label"] = Label("SNR")
+        self["signal_snr_bar"] = ProgressBar()
+        self["signal_snr_value"] = Label("")
+        self["signal_agc_label"] = Label("AGC")
+        self["signal_agc_bar"] = ProgressBar()
+        self["signal_agc_value"] = Label("")
+        self["signal_db"] = Label("")
         self["source_label"] = Label("")
         self["picon"] = Pixmap()
         self["key_red"] = Label("EXIT")
@@ -615,6 +695,11 @@ class CiefpVibesMain(Screen):
         self.time_update_timer.callback.append(self.updateTime)
         self.time_update_timer.start(1000)
         self.onClose.append(self.time_update_timer.stop)
+        # Timer za signal info (svake 1 sekunde)
+        self.signal_timer = eTimer()
+        self.signal_timer.callback.append(self.updateSignalInfo)
+        self.signal_timer.start(1000, False)
+        self.onClose.append(self.signal_timer.stop)
         
         self.progress_timer = eTimer()
         self.progress_timer.callback.append(self.updateProgress)
@@ -637,6 +722,52 @@ class CiefpVibesMain(Screen):
             self["time"].setText(t)
         except:
             pass
+
+    def updateSignalInfo(self):
+        """Ažurira prikaz signala na infobaru (SNR, AGC, DB) - samo za satelitski i DAB+ radio."""
+        try:
+            # Prikaži signal SAMO za satelitski radio i DAB+
+            if not self.is_dvb_radio:
+                if "signal_snr_label" in self:
+                    self["signal_snr_label"].setText("")
+                    self["signal_snr_bar"].setValue(0)
+                    self["signal_snr_value"].setText("")
+                    self["signal_agc_label"].setText("")
+                    self["signal_agc_bar"].setValue(0)
+                    self["signal_agc_value"].setText("")
+                    self["signal_db"].setText("")
+                return
+
+            signal = get_signal_info()
+            if not signal:
+                if "signal_snr_label" in self:
+                    self["signal_snr_label"].setText("SNR")
+                    self["signal_snr_bar"].setValue(0)
+                    self["signal_snr_value"].setText("--")
+                    self["signal_agc_label"].setText("AGC")
+                    self["signal_agc_bar"].setValue(0)
+                    self["signal_agc_value"].setText("--")
+                    self["signal_db"].setText("DB --")
+                return
+
+            snr = signal.get("snr", 0)
+            agc = signal.get("agc", 0)
+            db = signal.get("db", 0.0)
+
+            # Prikaz
+            if "signal_snr_label" in self:
+                self["signal_snr_label"].setText("SNR")
+                self["signal_snr_bar"].setValue(int(snr))
+                self["signal_snr_value"].setText(f"{snr}%")
+
+                self["signal_agc_label"].setText("AGC")
+                self["signal_agc_bar"].setValue(int(agc))
+                self["signal_agc_value"].setText(f"{agc}%")
+
+                self["signal_db"].setText(f"DB:{db:.2f}")
+
+        except Exception as e:
+            print(f"[CiefpVibes] updateSignalInfo error: {e}")
 
     def showDefaultPicon(self):
         """Prikaži default pikon odmah pri otvaranju plugina"""
@@ -964,7 +1095,7 @@ class CiefpVibesMain(Screen):
                 if rds_text:
                     line2_parts.append(rds_text)
 
-                line2 = " • ".join(line2_parts) if line2_parts else "Nema dodatnih informacija"
+                line2 = " • ".join(line2_parts) if line2_parts else "There is no additional information."
 
                 self["nowplaying"].setText(line1)
                 self["current_song"].setText(line2)
@@ -972,6 +1103,7 @@ class CiefpVibesMain(Screen):
 
         except Exception as e:
             print(f"[CiefpVibes] EPG/RDS timer error: {e}")
+
 
 # ==== TMP cache manage ===
     def get_tmp_cache_size(self):
@@ -1954,13 +2086,8 @@ class CiefpVibesMain(Screen):
         if not result:
             return
 
+        # Jedan prolaz - dodaj stanice sa EPG-om
         playlist_with_epg = []
-        for station_name, service_ref in result:
-            # service_ref dolazi originalno iz buketa — NE DEKODIRAJ!
-            epg_text = ""
-            playlist_with_epg.append((station_name, service_ref, epg_text))
-
-        self.playlist = playlist_with_epg
         for station_name, service_ref in result:
             epg_text = ""
             try:
@@ -3528,7 +3655,7 @@ class CiefpVibesMain(Screen):
                     if rds_text:
                         line2_parts.append(rds_text)
 
-                    line2 = " • ".join(line2_parts) if line2_parts else "Nema dodatnih informacija"
+                    line2 = " • ".join(line2_parts) if line2_parts else "There is no additional information."
 
                     self["nowplaying"].setText(line1)
                     self["current_song"].setText(line2)
@@ -4381,64 +4508,119 @@ class CiefpVibesMain(Screen):
             print(f"[CiefpVibes] OGG parse error: {e}")
 
         return {"artist": "", "title": "", "album": ""}
-                
+
     def parseArtistTitle(self, text):
         if not text:
             return "", ""
+
+        import re
 
         original_text = text
         text = text.strip()
         print(f"[CiefpVibes-DEBUG] parseArtistTitle input: '{text}'")
 
-        import re
-
-        # 1. Ukloni godinu na kraju u zagradama (npr. "What Is Love (1993)")
+        # 1. Ukloni godinu na kraju
         text = re.sub(r'\s*\(\d{4}\)\s*$', '', text).strip()
+        text = re.sub(r'\s*\[\w+\s*\d{4}\]\s*$', '', text).strip()  # [April 1988]
 
-        # 2. Ukloni vodeći redni broj + separator
-        # Podržava oblike: "001 - ", "01 - ", "008-", "10. ", "1 ", "12 -", "123.", itd.
+        # 2. Ukloni track number
         text = re.sub(r'^\d{1,4}\s*[\.\-\_\s]+\s*', '', text, flags=re.IGNORECASE).strip()
 
-        print(f"[CiefpVibes-DEBUG] After cleaning track number/year: '{text}'")
+        print(f"[CiefpVibes-DEBUG] After cleaning track/year: '{text}'")
 
-        # 3. Poseban slučaj za " • " separator (neki online streamovi)
+        # 3. Ukloni " • " prefiks
         if " • " in text:
             parts = text.split(" • ", 1)
-            artist_title_part = parts[1].strip() if len(parts) > 1 else parts[0].strip()
-            print(f"[CiefpVibes-DEBUG] Found ' • ' separator → using part: '{artist_title_part}'")
-        else:
-            artist_title_part = text
+            text = parts[1].strip() if len(parts) > 1 else parts[0].strip()
 
-        # 4. Lista svih mogućih separatora između artist i title
-        separators = [
-            " - ", " – ", " — ", " | ", " :: ", " › ", " / ", " ~ ",
-            " -", "- ", "– ", "— ", "| ", ":: ", "› ", "/ ", "~ "
-        ]
-
+        # 4. STANDARDNI separatori
+        separators = [" - ", " – ", " — ", " | ", " :: ", " › ", " / ", " ~ "]
         for sep in separators:
-            if sep in artist_title_part:
-                parts = artist_title_part.split(sep, 1)
+            if sep in text:
+                parts = text.split(sep, 1)
                 artist = parts[0].strip()
                 title = parts[1].strip()
 
-                # Očisti title od nepotrebnih sufiksa
-                title = re.sub(r'\s*(?:\(|\[).*?(?:\)|])\s*$', '', title).strip()  # (Official Video), [Remix] itd.
-                title = re.sub(r'\s*(Official|Video|Audio|Remix|Live|HD|Extended|Mix|Version).*?$', '', title, flags=re.IGNORECASE).strip()
-
-                # Ukloni vodeće crtice ili tačke iz title-a
-                while title.startswith(('-', '–', '—', '.', ' ', '_')):
-                    title = title[1:].strip()
+                # Očisti title
+                title = re.sub(r'\s*[\[\(][^\]\)]*[\]\)]\s*$', '', title).strip()
+                title = re.sub(r'\s*(Official|Video|Audio|Remix|Live|HD|Extended|Mix|Version).*?$', '', title,
+                               flags=re.IGNORECASE).strip()
 
                 if artist and title:
-                    print(f"[CiefpVibes-DEBUG] SUCCESS → artist='{artist}', title='{title}' (from original: '{original_text}')")
+                    # Korekcija poznatih grešaka
+                    artist = self._correctArtistName(artist)
+                    print(f"[CiefpVibes-DEBUG] SUCCESS (standard '{sep}') → artist='{artist}', title='{title}'")
                     return artist, title
-                elif title:  # Ako ima samo title
-                    print(f"[CiefpVibes-DEBUG] Title only → '{title}'")
-                    return "", title
 
-        # 5. Ako nema separatora – pretpostavi da je sve title
-        print(f"[CiefpVibes-DEBUG] No separator found → title only: '{artist_title_part}'")
-        return "", artist_title_part
+        # 5. DUPLI RAZMAK (2+ whitespace)
+        if re.search(r'[ \t\xa0]{2,}', text):
+            parts = re.split(r'[ \t\xa0]{2,}', text, maxsplit=1)
+
+            if len(parts) == 2:
+                artist = parts[0].strip()
+                title = parts[1].strip()
+
+                if artist and title and len(artist) > 1 and len(title) > 1:
+                    # Očisti title
+                    title = re.sub(r'\s*[\[\(][^\]\)]*[\]\)]\s*$', '', title).strip()
+                    title = re.sub(r'\s*(Official|Video|Audio|Remix|Live|HD|Extended|Mix|Version).*?$', '', title,
+                                   flags=re.IGNORECASE).strip()
+
+                    # Korekcija poznatih grešaka
+                    artist = self._correctArtistName(artist)
+
+                    print(f"[CiefpVibes-DEBUG] SUCCESS (double space) → artist='{artist}', title='{title}'")
+                    return artist, title
+
+        # 6. Nema separatora → title only
+        print(f"[CiefpVibes-DEBUG] No separator → title only: '{text}'")
+        return "", text
+
+    def _correctArtistName(self, artist):
+        """Ispravlja poznate greške u imenima izvođača."""
+        corrections = {
+            "be gees": "Bee Gees",
+            "bee gees": "Bee Gees",
+            "beattles": "The Beatles",
+            "beatles": "The Beatles",
+            "rolling stones": "The Rolling Stones",
+            "pink floyd": "Pink Floyd",
+            "abba": "ABBA",
+            "bananarama": "Bananarama",
+            "billy ocean": "Billy Ocean",
+            "bad boys blue": "Bad Boys Blue",
+            "berlin": "Berlin",
+            "tina turner": "Tina Turner",
+            "phil collins": "Phil Collins",
+            "bryan adams": "Bryan Adams",
+            "george michael": "George Michael",
+            "elton john": "Elton John",
+            "michael jackson": "Michael Jackson",
+            "madonna": "Madonna",
+            "prince": "Prince",
+            "queen": "Queen",
+            "bon jovi": "Bon Jovi",
+            "u2": "U2",
+            "roxette": "Roxette",
+            "ace of base": "Ace of Base",
+            "eurythmics": "Eurythmics",
+            "duran duran": "Duran Duran",
+            "depeche mode": "Depeche Mode",
+            "the police": "The Police",
+            "dire straits": "Dire Straits",
+            "fleetwood mac": "Fleetwood Mac",
+            "eagles": "Eagles",
+            "ccr": "Creedence Clearwater Revival",
+        }
+
+        artist_lower = artist.lower().strip()
+        if artist_lower in corrections:
+            corrected = corrections[artist_lower]
+            if corrected != artist:
+                print(f"[CiefpVibes] Artist corrected: '{artist}' → '{corrected}'")
+            return corrected
+
+        return artist
 
     def lockCurrentPoster(self):
         """Zaključaj trenutni poster (samo za lokalne fajlove)"""
@@ -4476,20 +4658,21 @@ class CiefpVibesMain(Screen):
 
     # === EXIT ===
     def exit(self):
+        # Zaustavi sve aktivne timere
+        for timer_name in [
+            'progress_timer', 'vibe_timer', 'stream_check_timer',
+            'epg_timer', 'signal_timer', 'time_update_timer',
+            'update_timer', 'poster_search_timer', 'poster_setup_timer',
+            'force_refresh_timer', 'lock_timer', 'auto_title_update_timer',
+            'cache_retry_timer'
+        ]:
+            if hasattr(self, timer_name):
+                try:
+                    getattr(self, timer_name).stop()
+                except:
+                    pass
+
         self.session.nav.stopService()
-        self.progress_timer.stop()
-        self.vibe_timer.stop()
-        self.stream_check_timer.stop()
-        if hasattr(self, 'epg_timer'):
-            self.epg_timer.stop()
-        self.saveConfig()
-        self.close()
-    
-    def exit(self):
-        self.session.nav.stopService()
-        self.progress_timer.stop()
-        self.vibe_timer.stop()
-        self.stream_check_timer.stop()
         self.saveConfig()
         self.close()
 
