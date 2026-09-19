@@ -425,7 +425,7 @@ config.plugins.ciefpTmpCache.auto_clear = ConfigSelection(default="500", choices
 
 PLUGIN_NAME = "CiefpVibes"
 PLUGIN_DESC = "Jukebox play music locally and online"
-PLUGIN_VERSION = "2.7"
+PLUGIN_VERSION = "2.8"
 PLUGIN_DIR = os.path.dirname(__file__) or "/usr/lib/enigma2/python/Plugins/Extensions/CiefpVibes"
 CACHE_DIR = "/tmp/ciefpvibes_cache"
 os.makedirs(CACHE_DIR, exist_ok=True)
@@ -502,7 +502,7 @@ class CiefpVibesMain(Screen):
             </widget>
 
             <!-- Pozadina postera (ostaje ista) -->
-            <widget name="poster" position="1250,20" size="650,800" alphatest="on" zPosition="1"/>
+            <widget name="poster" position="1250,70" size="600,700" alphatest="on" zPosition="1"/>
 
             <!-- NOVI INFOBAR - POZADINA -->
             <ePixmap pixmap="%s/infobars/%s" position="0,820" size="1920,200" alphatest="blend" zPosition="1"/>
@@ -520,7 +520,7 @@ class CiefpVibesMain(Screen):
             <widget name="current_song" position="260,920" size="1300,45" font="Bold;36" foregroundColor="#FFDD55" transparent="1" zPosition="4"/>
 
             <!-- VREME - desno -->
-            <widget name="time" position="1600,920" size="300,60" font="Regular;48" halign="right" valign="center" foregroundColor="#ffffff" transparent="1" zPosition="3"/>
+            <widget name="time" position="1600,840" size="300,60" font="Regular;48" halign="right" valign="center" foregroundColor="#ffffff" transparent="1" zPosition="3"/>
 
             <!-- STATUS OFFLINE -->
             <widget name="offline_status" position="260,950" size="1200,15" font="Regular;18" foregroundColor="#ff3333" halign="center" valign="center" transparent="0" backgroundColor="#000000" zPosition="4"/>
@@ -546,17 +546,17 @@ class CiefpVibesMain(Screen):
                     font="Bold;22" foregroundColor="#00ff00"
                     transparent="1" zPosition="4"/>
              <!-- NOVI LABEL ZA IME SATELITA -->
-            <widget name="satellite_name_label" position="1200,970" size="400,30"
+            <widget name="satellite_name_label" position="1200,970" size="700,30"
                     font="Bold;24" foregroundColor="#00ff00"
-                    transparent="1" zPosition="4" halign="right"/>        
+                    transparent="1" zPosition="4" halign="center"/>        
 
             <!-- DONJI RED SA TASTERIMA -->
-            <widget name="key_red"    position="60,1030"  size="260,50" font="Regular;32" foregroundColor="#ff5555" transparent="1" zPosition="3"/>
-            <widget name="key_green"  position="350,1030" size="260,50" font="Regular;32" foregroundColor="#55ff55" transparent="1" zPosition="3"/>
-            <widget name="key_yellow" position="640,1030" size="300,50" font="Regular;32" foregroundColor="#ffdd55" transparent="1" zPosition="3"/>
-            <widget name="key_blue"   position="930,1030" size="260,50" font="Regular;32" foregroundColor="#5599ff" transparent="1" zPosition="3"/>
-            <widget name="key_menu"   position="1200,1030" size="300,50" font="Regular;32" foregroundColor="#ffffff" transparent="1" zPosition="3"/>
-            <widget name="update_status" position="1250,1030" size="400,40" font="Regular;28" foregroundColor="#ffffff" halign="right" transparent="1" zPosition="3"/>
+            <widget name="key_red"    position="60,1020"  size="260,60" font="Regular;32" foregroundColor="#ff5555" transparent="1" zPosition="3"/>
+            <widget name="key_green"  position="350,1020" size="260,60" font="Regular;32" foregroundColor="#55ff55" transparent="1" zPosition="3"/>
+            <widget name="key_yellow" position="640,1020" size="300,60" font="Regular;32" foregroundColor="#ffdd55" transparent="1" zPosition="3"/>
+            <widget name="key_blue"   position="930,1020" size="260,60" font="Regular;32" foregroundColor="#5599ff" transparent="1" zPosition="3"/>
+            <widget name="key_menu"   position="1200,1020" size="300,60" font="Regular;32" foregroundColor="#ffffff" transparent="1" zPosition="3"/>
+            <widget name="update_status" position="1250,1020" size="400,60" font="Regular;28" foregroundColor="#ffffff" halign="right" transparent="1" zPosition="3"/>
         </screen>''' % (PLUGIN_DIR, bg, PLUGIN_DIR, ib, PLUGIN_DIR, PLUGIN_DIR, PLUGIN_DIR)
 
     def __init__(self, session):
