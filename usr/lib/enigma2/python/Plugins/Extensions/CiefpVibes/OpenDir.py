@@ -326,10 +326,9 @@ class OpenDirectoryMain(Screen):
         if idx < 0 or idx >= len(self.sources):
             self.session.open(MessageBox, "No source selected!", MessageBox.TYPE_WARNING)
             return
-        
+
         name, url = self.sources[idx]
         self.session.open(OpenDirectoryContent, self.main, url, name)
-
 
 # =================================== CONTENT EKRAN ===================================
 class OpenDirectoryContent(Screen):
@@ -431,7 +430,8 @@ class OpenDirectoryContent(Screen):
             "up": self.up,
             "down": self.down,
         }, -1)
-        
+
+        self.parse_error = None
         self.load_content()
     
     def up(self):
@@ -439,26 +439,34 @@ class OpenDirectoryContent(Screen):
     
     def down(self):
         self["content_list"].down()
-    
+
     def load_content(self):
         """Učitava sadržaj trenutnog URL-a"""
         self["content_list"].setList(["Loading..."])
         self.content_items = []
-        
+
         items = self._parse_directory(self.current_url)
-        
+
+        # Ako je bilo greške – prikaži poruku u statusu i listi
+        if self.parse_error:
+            self["status"].setText(f"❌ Not available: {self.parse_error[:70]}")
+            self["path_label"].setText(f"📂 {self.source_name}: {self.current_url}")
+            self["content_list"].setList(["[Source not available]"])
+            self.update_selected_list()
+            return
+
         items.sort(key=lambda x: (x[2] != 'folder', x[0].lower()))
         self.content_items = items
 
         display_list = []
         for name, url, typ in items:
             if typ == 'folder':
-                display_list.append((f"📁 {name}", name, url, typ))  # ← TUPLE
+                display_list.append((f"📁 {name}", name, url, typ))
             else:
                 if (name, url) in self.selected_files:
-                    display_list.append((f"✅ {name}", name, url, typ))  # ← TUPLE
+                    display_list.append((f"✅ {name}", name, url, typ))
                 else:
-                    display_list.append((f"🎵 {name}", name, url, typ))  # ← TUPLE
+                    display_list.append((f"🎵 {name}", name, url, typ))
 
         if not display_list:
             display_list = ["[Empty directory]"]
@@ -467,9 +475,22 @@ class OpenDirectoryContent(Screen):
         self["path_label"].setText(f"📂 {self.source_name}: {self.current_url}")
         self.update_selected_list()
 
+    def _show_parse_error(self):
+        """Prikazuje grešku u MessageBox-u (poziva se odloženo)"""
+        if hasattr(self, 'parse_error') and self.parse_error:
+            self.session.open(
+                MessageBox,
+                f"❌ Cannot load directory:\n\n{self.current_url}\n\n"
+                f"Error: {self.parse_error[:150]}",
+                MessageBox.TYPE_ERROR,
+                timeout=5
+            )
+            self.parse_error = None
+
     def _parse_directory(self, directory_url):
         """Parsira OpenDirectory i vraća listu (name, url, type)"""
         items = []
+        self.parse_error = None
         try:
             req = urllib.request.Request(directory_url, headers={
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
@@ -489,7 +510,6 @@ class OpenDirectoryContent(Screen):
                 if href.startswith(('?', '#', 'mailto:', 'javascript:')):
                     continue
 
-                # Očisti href (ukloni ? i # dijelove)
                 href_clean = href.split('?')[0].split('#')[0]
                 if not href_clean or href_clean in ('../', './'):
                     continue
@@ -500,37 +520,27 @@ class OpenDirectoryContent(Screen):
                 if not display_name or display_name == '..' or '&gt;' in display_name:
                     display_name = urllib.parse.unquote(os.path.basename(href_clean))
 
-                # === POPRAVLJENA LOGIKA ZA PREPOZNAVANJE ===
-                # 1. Prvo provjeri da li je audio fajl (po ekstenziji)
                 is_audio_file = False
                 for fmt in audio_formats:
                     if href_clean.lower().endswith(fmt) or display_name.lower().endswith(fmt):
                         is_audio_file = True
                         break
 
-                # 2. Zatim provjeri da li ima tačku u imenu (možda fajl bez ekstenzije)
                 has_extension = '.' in href_clean and not href_clean.endswith('/')
 
-                # 3. Ako je audio fajl - tretiraj kao fajl
                 if is_audio_file:
-                    # Ukloni / na kraju ako slučajno postoji
                     if full_url.endswith('/'):
                         full_url = full_url[:-1]
                     clean_name = display_name.replace("&amp;", "&").strip()
                     items.append((clean_name, full_url, 'file'))
-                # 4. Ako završava sa / - to je folder
                 elif href_clean.endswith('/') or full_url.endswith('/'):
                     folder_name = display_name.rstrip('/')
                     if folder_name and folder_name not in ('.', '..'):
-                        # Osiguraj da URL za folder završava sa /
                         if not full_url.endswith('/'):
                             full_url += '/'
                         items.append((folder_name, full_url, 'folder'))
-                # 5. Ako ima tačku u imenu, možda je fajl (ali ne podržan format)
                 elif has_extension:
-                    # Preskoči, nije audio
                     pass
-                # 6. Inače, tretiraj kao folder
                 else:
                     folder_name = display_name.rstrip('/')
                     if folder_name and folder_name not in ('.', '..'):
@@ -539,8 +549,8 @@ class OpenDirectoryContent(Screen):
                         items.append((folder_name, full_url, 'folder'))
 
         except Exception as e:
-            print(f"[OpenDir] Parse error: {e}")
-            self.session.open(MessageBox, f"Cannot load:\n{directory_url}", MessageBox.TYPE_ERROR, timeout=5)
+            print(f"[OpenDir] Parse error for {directory_url}: {e}")
+            self.parse_error = str(e)   # <-- samo upiši grešku, ne otvaraj MessageBox
 
         return items
 

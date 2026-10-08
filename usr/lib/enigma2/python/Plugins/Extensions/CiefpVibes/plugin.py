@@ -425,7 +425,7 @@ config.plugins.ciefpTmpCache.auto_clear = ConfigSelection(default="500", choices
 
 PLUGIN_NAME = "CiefpVibes"
 PLUGIN_DESC = "Jukebox play music locally and online"
-PLUGIN_VERSION = "2.8"
+PLUGIN_VERSION = "2.9"
 PLUGIN_DIR = os.path.dirname(__file__) or "/usr/lib/enigma2/python/Plugins/Extensions/CiefpVibes"
 CACHE_DIR = "/tmp/ciefpvibes_cache"
 os.makedirs(CACHE_DIR, exist_ok=True)
@@ -465,6 +465,7 @@ os.makedirs(NETWORK_MOUNT, exist_ok=True)
 # GitHub URL-ovi
 GITHUB_M3U_ARTIST_URL = "https://api.github.com/repos/ciefp/CiefpVibesFiles/contents/M3U-ARTIST"
 GITHUB_M3U_MIX_URL = "https://api.github.com/repos/ciefp/CiefpVibesFiles/contents/M3U-MIX"
+GITHUB_M3U_EXYU_URL = "https://api.github.com/repos/ciefp/CiefpVibesFiles/contents/M3U-EXYU"
 GITHUB_TV_URL = "https://api.github.com/repos/ciefp/CiefpVibesFiles/contents/TV"
 GITHUB_RADIO_URL = "https://api.github.com/repos/ciefp/CiefpVibesFiles/contents/RADIO"
 # GitHub URL za DAB+ bukete
@@ -479,7 +480,7 @@ os.makedirs(DAB_CACHE_DIR, exist_ok=True)
 
 class CiefpVibesMain(Screen):
     def buildSkin(self):
-        bg = getattr(self, "current_bg", "background7.png")
+        bg = getattr(self, "current_bg", "background4.png")
         ib = getattr(self, "current_ib", "infobar4.png")
 
         return '''<?xml version="1.0" encoding="utf-8"?>
@@ -561,9 +562,9 @@ class CiefpVibesMain(Screen):
 
     def __init__(self, session):
         self["poster"] = Pixmap()
-        self.current_bg = "background7.png"
-        self.current_ib = "infobar7.png"
-        self.current_poster = "poster5.png"
+        self.current_bg = "background4.png"
+        self.current_ib = "infobar4.png"
+        self.current_poster = "poster6.png"
         self.last_playlist_path = "/etc/enigma2/ciefpvibes_last.txt"
         self.loadConfig()
 
@@ -5026,6 +5027,7 @@ class CiefpVibesMain(Screen):
         menu_items = [
             ("🎶 M3U ARTIST Playlists", "M3U ARTIST"),
             ("🎶 M3U MIX Playlists", "M3U MIX"),
+            ("🎶 M3U EXYU Playlists", "M3U EXYU"),
             ("📺 .tv Bouquets", "TV"),
             ("📻 Radio Lists", "RADIO"),
         ]
@@ -5068,6 +5070,7 @@ class CiefpVibesMain(Screen):
         url_map = {
             "M3U ARTIST": GITHUB_M3U_ARTIST_URL,
             "M3U MIX": GITHUB_M3U_MIX_URL,
+            "M3U EXYU": GITHUB_M3U_EXYU_URL,
             "TV": GITHUB_TV_URL,
             "RADIO": GITHUB_RADIO_URL,
         }
